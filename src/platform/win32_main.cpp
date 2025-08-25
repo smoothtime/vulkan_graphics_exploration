@@ -248,9 +248,11 @@ WinMain(HINSTANCE instance,
 	const char* enabledLayers[1] = { "VK_LAYER_KHRONOS_validation" };
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
 	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface);
+	vulkanBuildCommandPool(&backend, nullptr);
 	
 	OutputDebugStringA("Renderer backend initialized");
 
+	setvbuf(stdout, NULL, _IONBF, 0);
     while(GLOBAL_RUNNING)
     {
 		// reload dll if needed
@@ -272,6 +274,9 @@ WinMain(HINSTANCE instance,
         {
             gameDLL.gameUpdate(&memory, &inputForFrame, TargetSecondsPerFrame);
         }
+		vulkanDraw(&backend);
+		
+		
         inputLastFrame = inputForFrame;
         inputForFrame.mouseDeltaX = 0;
         inputForFrame.mouseDeltaY = 0;
@@ -297,6 +302,6 @@ WinMain(HINSTANCE instance,
 			}
 		}
     }
-	
+	cleanupVulkan(&backend, nullptr);
 	return 0;
 }
