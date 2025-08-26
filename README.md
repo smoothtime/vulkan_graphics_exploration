@@ -11,4 +11,17 @@ or whatever your toolchain is.
 
 2) Make sure the Vulkan SDK is installed and there's a VULKAN_SDK environment variable set.
 
-3) Invoke build.bat
+3) Install VulkanMemoryAllocator somewhere and set a VMA_PATH environment variable.
+
+4) Invoke build.bat
+
+Todo:
+- compile a shader
+- render a triangle
+- render a mesh
+- create a concept of render items abstracted from vulkan and translate those draw calls
+- sort render items
+- moveable camera
+- skin mesh
+- animate mesh
+- look into render graphs

@@ -247,7 +247,7 @@ WinMain(HINSTANCE instance,
 	const char* instanceExtensions[2] = { "VK_KHR_surface", "VK_KHR_win32_surface"};
 	const char* enabledLayers[1] = { "VK_LAYER_KHRONOS_validation" };
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
-	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface);
+	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
 	vulkanBuildCommandPool(&backend, nullptr);
 	
 	OutputDebugStringA("Renderer backend initialized");
