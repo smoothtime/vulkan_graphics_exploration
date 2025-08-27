@@ -5,8 +5,12 @@
 #include "platform.h"
 #include "win32_main.h"
 
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+#include "imgui_impl_vulkan.h"
 #define RENDER_WINDOW_CALLBACK(functionName) VkResult functionName(VkInstance *pInstance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
 typedef RENDER_WINDOW_CALLBACK(RenderWindowCallback);
 #include "vk.h"
@@ -46,6 +50,10 @@ Win32MainWindowCallback(HWND Window,
 						LPARAM LParam)
 {
 	LRESULT result = 0;
+	if (ImGui_ImplWin32_WndProcHandler(Window, Message, WParam, LParam))
+	{
+		return true;
+	}
 	switch(Message)
 	{
 		case WM_CLOSE:
@@ -249,6 +257,11 @@ WinMain(HINSTANCE instance,
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
 	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
 	vulkanBuildCommandPool(&backend, nullptr);
+	// this initializes the core structures of imgui
+	ImGui::CreateContext();
+	// this initializes imgui for SDL
+	ImGui_ImplWin32_Init(Window);
+	initializeImgui(&backend);
 	
 	OutputDebugStringA("Renderer backend initialized");
 
@@ -274,6 +287,13 @@ WinMain(HINSTANCE instance,
         {
             gameDLL.gameUpdate(&memory, &inputForFrame, TargetSecondsPerFrame);
         }
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplWin32_NewFrame();
+		ImGui::NewFrame();
+		
+		ImGui::ShowDemoWindow();
+		ImGui::Render();
+		
 		vulkanDraw(&backend);
 		
 		

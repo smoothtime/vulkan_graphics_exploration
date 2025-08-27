@@ -9,7 +9,18 @@
 #define VMA_VULKAN_VERSION 1003000
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
+#define VK_CHECK(x)                                                     \
+    do {                                                                \
+        VkResult err = x;                                               \
+        if (err) {                                                      \
+            printf("Detected Vulkan error: %s\n", string_VkResult(err)); \
+            abort();                                                    \
+        }                                                               \
+    } while (0)
+
 #include "vk_utility.h"
+
+
 
 struct VulkanBackend;
 typedef struct DeletionQueue
@@ -65,20 +76,23 @@ struct VulkanBackend
 	VkFence 		imageAvailableFence;
 	VkSemaphore* 	renderFinishedSemaphores; // one for each swapchainImage 
 	VkFence 		syncHostWithDeviceFence;
+	VkFence			immFence;
 	
 	VkQueue graphicsQueue;
 	uint32 	graphicsQueueCount;
 	uint32 	graphicsQueueFamily;
 	VkCommandBufferBeginInfo commandBufferBeginInfo;
 	
-	DescriptorAllocator 	globalDescriptorAllocator;
-	VkDescriptorSet 		drawImageDescriptorSet;
-	VkDescriptorSetLayout 	drawImageDescriptorSetLayout;
+	vk_util::DescriptorAllocator 	globalDescriptorAllocator;
+	VkDescriptorSet 				drawImageDescriptorSet;
+	VkDescriptorSetLayout 			drawImageDescriptorSetLayout;
 	
 	VkPipeline 				gradientPipeline;
 	VkPipelineLayout		gradientPipelineLayout;
 	
 	FrameData 		frameData;
+	VkCommandBuffer	immCommandBuffer;
+	VkCommandPool	immCommandPool;
 	DeletionQueue 	vulkanDeletionQueue;
 	
 	VmaAllocator 	vAllocator;
@@ -271,6 +285,11 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	// reusing fence create info and VkResult
 	fenceCreated = vkCreateFence(backend.logicalDevice, &fenceCreateInfo, pAllocator, &backend.syncHostWithDeviceFence);
 	printf("created host/device sync fence: %s\n", string_VkResult(fenceCreated));
+	fenceCreated = vkCreateFence(backend.logicalDevice, &fenceCreateInfo, pAllocator, &backend.immFence);
+	printf("created imm fence: %s\n", string_VkResult(fenceCreated));
+	backend.vulkanDeletionQueue.pushFunction([=](VulkanBackend* be) {
+		vkDestroyFence(be->logicalDevice, be->immFence, nullptr); //pAllocator
+	});
 	
 	// Initialize allocator for images and buffers and what have you
 	VmaAllocatorCreateInfo allocatorCreateInfo = {};
@@ -335,13 +354,13 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	});
 	
 	// initialize descriptors for the draw image
-	std::vector<DescriptorAllocator::PoolSizeRatio> sizes = 
+	std::vector<vk_util::DescriptorAllocator::PoolSizeRatio> sizes = 
 	{
 		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
 	};
 	backend.globalDescriptorAllocator.initPool(backend.logicalDevice, 10, sizes, pAllocator);
 	{
-		DescriptorLayoutBuilder builder;
+		vk_util::DescriptorLayoutBuilder builder;
 		builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 		backend.drawImageDescriptorSetLayout = builder.build(backend.logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT, pAllocator);
 	}
@@ -379,7 +398,7 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	printf("compute pipeline layout created: %s\n", string_VkResult(computePipelineLayoutCreated));
 	
 	VkShaderModule computeDrawShader;
-	if (!loadShaderModule("..\\shaders\\gradient.comp.spv", backend.logicalDevice, &computeDrawShader))
+	if (!vk_util::loadShaderModule("..\\shaders\\gradient.comp.spv", backend.logicalDevice, &computeDrawShader))
 	{
 		printf("failed to load shader");
 	}
@@ -431,6 +450,67 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	#endif
 	
 	return backend;
+}
+
+void initializeImgui(VulkanBackend *backend)
+{
+	// 1: create descriptor pool for IMGUI
+	//  the size of the pool is very oversized, but it's copied from imgui demo
+	//  itself.
+	VkDescriptorPoolSize poolSizes[] =
+	{ 
+		{ VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+		{ VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+	};
+
+	VkDescriptorPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	poolInfo.maxSets = 1000;
+	poolInfo.poolSizeCount = (uint32)std::size(poolSizes);
+	poolInfo.pPoolSizes = poolSizes;
+
+	VkDescriptorPool imguiPool;
+	VK_CHECK(vkCreateDescriptorPool(backend->logicalDevice, &poolInfo, nullptr, &imguiPool));
+
+	// 2: initialize imgui library for Vulkan assuming platform layer already called
+	// CreateContext() and the platform imp init
+
+	// this initializes imgui for Vulkan
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.Instance = backend->instance;
+	init_info.PhysicalDevice = backend->physicalDevice;
+	init_info.Device = backend->logicalDevice;
+	init_info.Queue = backend->graphicsQueue;
+	init_info.DescriptorPool = imguiPool;
+	init_info.MinImageCount = 3;
+	init_info.ImageCount = 3;
+	init_info.UseDynamicRendering = true;
+
+	//dynamic rendering parameters for imgui to use
+	init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+	init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+	init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &backend->chosenSurfaceFormat.format;
+	
+
+	init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+	ImGui_ImplVulkan_Init(&init_info);
+
+	// add the destroy the imgui created structures
+	backend->vulkanDeletionQueue.pushFunction([=](VulkanBackend* be) {
+		ImGui_ImplVulkan_Shutdown();
+		vkDestroyDescriptorPool(be->logicalDevice, imguiPool, nullptr);
+	});
 }
 
 void
@@ -485,30 +565,28 @@ void
 vulkanBuildCommandPool(VulkanBackend *backend, VkAllocationCallbacks* pAllocator)
 {
 	// making a command pool that gives us resetable command buffers for using the whole dang time
-	VkCommandPoolCreateInfo commandPoolCreateInfo = {};
-	commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-	commandPoolCreateInfo.pNext = nullptr;
-	commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-	commandPoolCreateInfo.queueFamilyIndex = backend->graphicsQueueFamily;
-	
-	VkResult poolCreated = vkCreateCommandPool(backend->logicalDevice, &commandPoolCreateInfo, pAllocator, &backend->frameData.commandPool);
+	VkResult poolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->frameData.commandPool);
 	printf("created command pool: %s\n", string_VkResult(poolCreated));
-	
-	VkCommandBufferAllocateInfo commandBufferAllocateInfo = {};
-	commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	commandBufferAllocateInfo.pNext = nullptr;
-	commandBufferAllocateInfo.commandPool = backend->frameData.commandPool;
-	commandBufferAllocateInfo.commandBufferCount = 1;
-	commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 
-	VkResult commandBufferAllocated = vkAllocateCommandBuffers(backend->logicalDevice, &commandBufferAllocateInfo, &backend->frameData.graphicsCommandBuffer);
+	VkResult commandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->frameData.commandPool, 1, &backend->frameData.graphicsCommandBuffer);
 	printf("allocated graphics command buffer: %s\n", string_VkResult(commandBufferAllocated));
+	
+	// creating another pool for immediate mode commands
+	VkResult immPoolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->immCommandPool);
+	printf("created imm command pool: %s\n", string_VkResult(immPoolCreated));
+	
+	VkResult immCommandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->immCommandPool, 1, &backend->immCommandBuffer);
+	printf("allocated imm command buffer: %s\n", string_VkResult(immCommandBufferAllocated));
+	
+	backend->vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+		vkDestroyCommandPool(be->logicalDevice, be->immCommandPool, nullptr); //pAllocator
+	});
+	
 }
 
 void
 vulkanBeginCommandBuffer(VulkanBackend *backend)
 {
-	
 	VkResult resetCommandBuffer = vkResetCommandBuffer(backend->frameData.graphicsCommandBuffer, 0);
 	//printf("reset command buffer: %s\n", string_VkResult(resetCommandBuffer));
 	VkResult beganCommandBuffer = vkBeginCommandBuffer(backend->frameData.graphicsCommandBuffer, &backend->commandBufferBeginInfo);
@@ -582,6 +660,32 @@ void vulkanCopyImage(VulkanBackend* backend, VkImage source, VkImage dest, VkExt
 }
 
 void
+drawImGui(VkCommandBuffer commandBuffer, VkImageView imageView, VkImageLayout layout, VkExtent2D renderExtent)
+{
+	VkRenderingAttachmentInfo colorAttachment = {};
+	colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+	colorAttachment.pNext = nullptr;
+	colorAttachment.imageView = imageView;
+	colorAttachment.imageLayout = layout;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	
+	VkRenderingInfo renderInfo = {};
+    renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderInfo.pNext = nullptr;
+    renderInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, renderExtent };
+    renderInfo.layerCount = 1;
+    renderInfo.colorAttachmentCount = 1;
+    renderInfo.pColorAttachments = &colorAttachment;
+    renderInfo.pDepthAttachment = nullptr;
+    renderInfo.pStencilAttachment = nullptr;
+	
+	vkCmdBeginRendering(commandBuffer, &renderInfo);
+	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+	vkCmdEndRendering(commandBuffer);
+}
+
+void
 vulkanDraw(VulkanBackend* backend)
 {
 	
@@ -635,8 +739,14 @@ vulkanDraw(VulkanBackend* backend)
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	vulkanCopyImage(backend, backend->drawImage.imageHandle, backend->swapchainImageHandles[imageIndex], backend->drawExtent, backend->windowExtent);
 	
+	// make swapchain image layout attachment optimal so we can draw immediate mode commands
+	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	
+	//draw imgui
+	drawImGui(backend->frameData.graphicsCommandBuffer, backend->swapchainImageViews[imageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, backend->windowExtent);
+	
 	// make swapchain image presentable with a pipeline barrier
-	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 	
 	// end command buffer
 	vkEndCommandBuffer(backend->frameData.graphicsCommandBuffer);
@@ -689,6 +799,40 @@ vulkanDraw(VulkanBackend* backend)
 	//printf("image presented: %s\n", string_VkResult(presented));
 	
 	backend->frameNumber++;
+}
+
+void vulkanImmediateSubmit(VulkanBackend *backend, std::function<void(VkCommandBuffer cmdBuffer)>&& function)
+{
+	VK_CHECK(vkResetFences(backend->logicalDevice, 1, &backend->immFence));
+	VK_CHECK(vkResetCommandBuffer(backend->immCommandBuffer, 0));
+	
+	VkCommandBufferBeginInfo beginInfo = {};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	
+	VK_CHECK(vkBeginCommandBuffer(backend->immCommandBuffer, &beginInfo));
+	function(backend->immCommandBuffer);
+	VK_CHECK(vkEndCommandBuffer(backend->immCommandBuffer));
+	
+	VkCommandBufferSubmitInfo bufferSubmitInfo = {};
+	bufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+	bufferSubmitInfo.pNext = nullptr;
+	bufferSubmitInfo.commandBuffer = backend->immCommandBuffer;
+	bufferSubmitInfo.deviceMask = 0;
+	
+	// not waiting or signalling any semaphores
+	VkSubmitInfo2 submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+	submitInfo.pNext = nullptr;
+	submitInfo.waitSemaphoreInfoCount = 0;
+	submitInfo.pWaitSemaphoreInfos = nullptr;
+	submitInfo.signalSemaphoreInfoCount = 0;
+	submitInfo.pSignalSemaphoreInfos = nullptr;
+	submitInfo.commandBufferInfoCount = 1;
+	submitInfo.pCommandBufferInfos = &bufferSubmitInfo;
+	
+	VK_CHECK(vkQueueSubmit2(backend->graphicsQueue, 1, &submitInfo, backend->immFence));
+	VK_CHECK(vkWaitForFences(backend->logicalDevice, 1, &backend->immFence, true, 9999999999));
 }
 
 #define VK_H
