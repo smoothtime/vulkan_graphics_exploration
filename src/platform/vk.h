@@ -1,11 +1,15 @@
 #if !defined(VK_H)
-
-#include <vulkan/vulkan.h>
-#include <vulkan/vk_enum_string_helper.h>
-#define VMA_IMPLEMENTATION
-#include "vk_mem_alloc.h"
+#include <vector>
+#include <span>
 #include <deque>
 #include <functional>
+#include <fstream>
+#include <vulkan/vulkan.h>
+#include <vulkan/vk_enum_string_helper.h>
+#define VMA_VULKAN_VERSION 1003000
+#define VMA_IMPLEMENTATION
+#include "vk_mem_alloc.h"
+#include "vk_utility.h"
 
 struct VulkanBackend;
 typedef struct DeletionQueue
@@ -66,6 +70,13 @@ struct VulkanBackend
 	uint32 	graphicsQueueCount;
 	uint32 	graphicsQueueFamily;
 	VkCommandBufferBeginInfo commandBufferBeginInfo;
+	
+	DescriptorAllocator 	globalDescriptorAllocator;
+	VkDescriptorSet 		drawImageDescriptorSet;
+	VkDescriptorSetLayout 	drawImageDescriptorSetLayout;
+	
+	VkPipeline 				gradientPipeline;
+	VkPipelineLayout		gradientPipelineLayout;
 	
 	FrameData 		frameData;
 	DeletionQueue 	vulkanDeletionQueue;
@@ -306,6 +317,7 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	VkImageViewCreateInfo drawImageViewCreateInfo = {};
 	drawImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	drawImageViewCreateInfo.pNext = nullptr;
+	drawImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	drawImageViewCreateInfo.image = backend.drawImage.imageHandle;
 	drawImageViewCreateInfo.format = backend.drawImage.imageFormat;
 	drawImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
@@ -322,8 +334,81 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 		vmaDestroyImage(be->vAllocator, be->drawImage.imageHandle, be->drawImage.allocation);
 	});
 	
+	// initialize descriptors for the draw image
+	std::vector<DescriptorAllocator::PoolSizeRatio> sizes = 
+	{
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
+	};
+	backend.globalDescriptorAllocator.initPool(backend.logicalDevice, 10, sizes, pAllocator);
+	{
+		DescriptorLayoutBuilder builder;
+		builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+		backend.drawImageDescriptorSetLayout = builder.build(backend.logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT, pAllocator);
+	}
+	backend.drawImageDescriptorSet = backend.globalDescriptorAllocator.allocate(backend.logicalDevice, backend.drawImageDescriptorSetLayout);
+	
+	VkDescriptorImageInfo imageInfo = {};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	imageInfo.imageView = backend.drawImage.imageView;
+	
+	VkWriteDescriptorSet drawImageWrite = {};
+	drawImageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	drawImageWrite.pNext = nullptr;
+	drawImageWrite.dstBinding = 0;
+	drawImageWrite.dstSet = backend.drawImageDescriptorSet;
+	drawImageWrite.descriptorCount = 1;
+	drawImageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	drawImageWrite.pImageInfo = &imageInfo;
+	
+	vkUpdateDescriptorSets(backend.logicalDevice, 1, &drawImageWrite, 0, nullptr);
+	
+	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
+		assert(pAllocator == nullptr);
+		be->globalDescriptorAllocator.destroyPool(be->logicalDevice, pAllocator);
+		vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, pAllocator);
+	});
+	
+	// initialize pipelines
+	VkPipelineLayoutCreateInfo computeLayoutCreateInfo = {};
+	computeLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	computeLayoutCreateInfo.pNext = nullptr;
+	computeLayoutCreateInfo.pSetLayouts = &backend.drawImageDescriptorSetLayout;
+	computeLayoutCreateInfo.setLayoutCount = 1;
+	
+	VkResult computePipelineLayoutCreated = vkCreatePipelineLayout(backend.logicalDevice, &computeLayoutCreateInfo, pAllocator, &backend.gradientPipelineLayout);
+	printf("compute pipeline layout created: %s\n", string_VkResult(computePipelineLayoutCreated));
+	
+	VkShaderModule computeDrawShader;
+	if (!loadShaderModule("..\\shaders\\gradient.comp.spv", backend.logicalDevice, &computeDrawShader))
+	{
+		printf("failed to load shader");
+	}
+	VkPipelineShaderStageCreateInfo stageCreateInfo = {};
+	stageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stageCreateInfo.pNext = nullptr;
+	stageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	stageCreateInfo.module = computeDrawShader;
+	stageCreateInfo.pName = "main";
+	
+	VkComputePipelineCreateInfo computePipelineCreateInfo = {};
+	computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	computePipelineCreateInfo.pNext = nullptr;
+	computePipelineCreateInfo.layout = backend.gradientPipelineLayout;
+	computePipelineCreateInfo.stage = stageCreateInfo;
+	
+	VkResult computePipelineCreated = vkCreateComputePipelines(backend.logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, pAllocator, &backend.gradientPipeline);
+	printf("compute pipeline created: %s\n", string_VkResult(computePipelineCreated));
+	
+	vkDestroyShaderModule(backend.logicalDevice, computeDrawShader, pAllocator);
+	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend *be){
+		assert(pAllocator == nullptr);
+		vkDestroyPipelineLayout(be->logicalDevice, be->gradientPipelineLayout, pAllocator);
+		vkDestroyPipeline(be->logicalDevice, be->gradientPipeline, pAllocator);
+	});
+	
 	
 	// fucking around
+	#if 0
 	VkImageCreateInfo createInfo = {};
 	createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	createInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -339,6 +424,11 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	
 	VkResult result = vkCreateImage(backend.logicalDevice, &createInfo, pAllocator, &backend.testImage);
 	printf("result: %s\n", string_VkResult(result));
+	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend* be){
+		vkDestroyImage(be->logicalDevice, be->testImage, pAllocator);
+	});
+		
+	#endif
 	
 	return backend;
 }
@@ -361,8 +451,6 @@ cleanupVulkan(VulkanBackend* backend, VkAllocationCallbacks* pAllocator)
 	// TODO(James) vkDestroyDescriptorSetLayout when we have them
 	// TODO(James) vkDestroyDescriptorPool when we have them
 	vkDestroyCommandPool(backend->logicalDevice, backend->frameData.commandPool, pAllocator);
-	
-	vkDestroyImage(backend->logicalDevice, backend->testImage, pAllocator);
 	
 	for(uint32 i = 0; i < backend->swapchainImageCount; i++)
 	{
@@ -422,9 +510,9 @@ vulkanBeginCommandBuffer(VulkanBackend *backend)
 {
 	
 	VkResult resetCommandBuffer = vkResetCommandBuffer(backend->frameData.graphicsCommandBuffer, 0);
-	printf("reset command buffer: %s\n", string_VkResult(resetCommandBuffer));
+	//printf("reset command buffer: %s\n", string_VkResult(resetCommandBuffer));
 	VkResult beganCommandBuffer = vkBeginCommandBuffer(backend->frameData.graphicsCommandBuffer, &backend->commandBufferBeginInfo);
-	printf("began command buffer: %s\n", string_VkResult(beganCommandBuffer));
+	//printf("began command buffer: %s\n", string_VkResult(beganCommandBuffer));
 }
 
 void vulkanTransitionImage(VulkanBackend* backend, VkImage image, VkImageAspectFlags aspectFlags, VkImageLayout oldLayout, VkImageLayout newLayout)
@@ -507,7 +595,7 @@ vulkanDraw(VulkanBackend* backend)
 	vkWaitForFences(backend->logicalDevice, 1, &backend->imageAvailableFence, VK_TRUE, 1000000000);
 	vkResetFences(backend->logicalDevice, 1, &backend->imageAvailableFence);
 	VkResult imageAcquired = vkAcquireNextImageKHR(backend->logicalDevice, backend->swapchain, UINT64_MAX, backend->imageAvailableSemaphore, backend->imageAvailableFence, &imageIndex);
-	printf("image acquired: %s\n", string_VkResult(imageAcquired));
+	//printf("image acquired: %s\n", string_VkResult(imageAcquired));
 	
 	backend->drawExtent.width = backend->drawImage.imageExtent.width;
 	backend->drawExtent.height = backend->drawImage.imageExtent.height;
@@ -520,6 +608,7 @@ vulkanDraw(VulkanBackend* backend)
 	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, oldLayout, newLayout);
 	
 	// translate commands for frame to vk commands
+	#if 0
 	// lol jk we're just clearing the screen
 	real32 flash = abs(sin(backend->frameNumber / 30.0f));
 	VkClearColorValue clearValue = { {0.0f, 0.0f, flash, 1.0f} };
@@ -530,8 +619,17 @@ vulkanDraw(VulkanBackend* backend)
     clearRange.baseArrayLayer = 0;
     clearRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 	vkCmdClearColorImage(backend->frameData.graphicsCommandBuffer, backend->drawImage.imageHandle, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
-	
-	
+	#endif
+	#if 1
+	// lol jk we're just running our little compute shader
+	vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backend->gradientPipeline);
+	vkCmdBindDescriptorSets(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backend->gradientPipelineLayout, 0, 1, &backend->drawImageDescriptorSet, 0, nullptr);
+	// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
+	uint32 groupCountX = std::ceil(backend->drawExtent.width / 16.0);
+	uint32 groupCountY = std::ceil(backend->drawExtent.height / 16.0);
+	printf("draw extent is %d by %d dispatching in groups of %d by %d\n", backend->drawImage.imageExtent.width, backend->drawImage.imageExtent.height, groupCountX, groupCountY);
+	vkCmdDispatch(backend->frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
+	#endif
 	// transfer image from drawImage to the swapchain image
 	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -588,7 +686,7 @@ vulkanDraw(VulkanBackend* backend)
 	presentInfo.pImageIndices = &imageIndex;
 	
 	VkResult presented = vkQueuePresentKHR(backend->graphicsQueue, &presentInfo);
-	printf("image presented: %s\n", string_VkResult(presented));
+	//printf("image presented: %s\n", string_VkResult(presented));
 	
 	backend->frameNumber++;
 }

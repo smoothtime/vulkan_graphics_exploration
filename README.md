@@ -13,7 +13,11 @@ or whatever your toolchain is.
 
 3) Install VulkanMemoryAllocator somewhere and set a VMA_PATH environment variable.
 
-4) Invoke build.bat
+4) Invoke buildshaders.bat
+
+5) Invoke build.bat
+
+6) output file is ..\build\win32_main.exe
 
 Todo:
 - compile a shader

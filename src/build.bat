@@ -1,5 +1,5 @@
 @echo off
-set CommonCompilerFlags=-MT -nologo /I ..\src\platform /I %VULKAN_SDK%\Include /I %VMA_PATH%\include -fp:fast -Gm- -EHa- -GR- -Od -Oi -WX -W4 -wd4100 -wd4189 -wd4201 -wd4244 -wd4577 -wd4505 -wd4127 -wd4530 -wd4324 -FC -Z7 
+set CommonCompilerFlags=/std:c++20 -MT -nologo /I ..\src\platform /I %VULKAN_SDK%\Include /I %VMA_PATH%\include -fp:fast -Gm- -EHa- -GR- -Od -Oi -WX -W4 -wd4100 -wd4189 -wd4201 -wd4244 -wd4577 -wd4505 -wd4127 -wd4530 -wd4324 -FC -Z7 
 set CommonLinkerFlags= -incremental:no -opt:ref /LIBPATH:%VULKAN_SDK%\Lib user32.lib gdi32.lib winmm.lib vulkan-1.lib 
 
 IF NOT EXIST ..\build mkdir ..\build
