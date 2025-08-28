@@ -108,6 +108,15 @@ Win32ProcessPendingMessages()
             case WM_KEYDOWN:
             case WM_KEYUP:
             {
+				
+				ImGuiIO& io = ImGui::GetIO();
+
+				if (io.WantCaptureKeyboard)
+				{
+					TranslateMessage(&Message);
+					DispatchMessageA(&Message);
+					continue;
+				}
                 uint32 VKCode = (uint32)Message.wParam;
 
                 bool32 WasDown = ((Message.lParam & (1 << 30)) != 0);
