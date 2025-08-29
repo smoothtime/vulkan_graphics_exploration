@@ -35,18 +35,41 @@ struct AllocatedImage
 	VkFormat 		imageFormat;
 };
 
-struct ComputePushConstants {
+struct AllocatedBuffer
+{
+	VkBuffer 			buffer;
+	VmaAllocation 		allocation;
+	VmaAllocationInfo 	allocationInfo;
+};
+
+struct ComputePushConstants
+{
 	glm::vec4 data1;
 	glm::vec4 data2;
 	glm::vec4 data3;
 	glm::vec4 data4;
 };
 
-struct ComputeEffect {
+struct ComputeEffect 
+{
 	const char 		 	 *name;
 	VkPipelineLayout 	 layout;
 	VkPipeline 			 pipeline;
 	ComputePushConstants data;
+};
+
+struct GPUMeshBuffers
+{
+	AllocatedBuffer indexBuffer;
+	AllocatedBuffer vertexBuffer;
+	VkDeviceAddress vertexBufferAddress;
+};
+
+// push constants used for mesh draws
+struct GPUDrawPushConstants
+{
+	glm::mat4 		worldMatrix;
+	VkDeviceAddress vertexBuffer;
 };
 
 #define VK_TYPES_H

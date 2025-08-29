@@ -5,7 +5,7 @@
 #include "platform.h"
 #include "win32_main.h"
 
-#include <glm/vec4.hpp>
+#include "math_types.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -267,7 +267,6 @@ WinMain(HINSTANCE instance,
 	const char* enabledLayers[1] = { "VK_LAYER_KHRONOS_validation" };
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
 	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
-	vulkanBuildCommandPool(&backend, nullptr);
 	EffectUI effectUI = {};
 	// this initializes the core structures of imgui
 	ImGui::CreateContext();

@@ -1,5 +1,6 @@
 #if !defined(VK_H)
 #include <vector>
+#include <array>
 #include <span>
 #include <deque>
 #include <functional>
@@ -67,11 +68,120 @@ struct VulkanBackend
 	
 	VkPipelineLayout	trianglePipelineLayout;
 	VkPipeline 			trianglePipeline;
+	
+	VkPipelineLayout 	triangleMeshPipelineLayout;
+	VkPipeline			triangleMeshPipeline;
+	GPUMeshBuffers		rectangle;
 
 
 	//fucking around
 	VkImage testImage;
 };
+
+void vulkanImmediateSubmit(VkDevice& device, VkCommandBuffer& commandBuffer, VkFence& fence, VkQueue& graphicsQueue, std::function<void(VkCommandBuffer cmdBuffer)>&& function)
+{
+	VK_CHECK(vkResetFences(device, 1, &fence));
+	VK_CHECK(vkResetCommandBuffer(commandBuffer, 0));
+	
+	VkCommandBufferBeginInfo beginInfo = {};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	
+	VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+	function(commandBuffer);
+	VK_CHECK(vkEndCommandBuffer(commandBuffer));
+	
+	VkCommandBufferSubmitInfo bufferSubmitInfo = {};
+	bufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+	bufferSubmitInfo.pNext = nullptr;
+	bufferSubmitInfo.commandBuffer = commandBuffer;
+	bufferSubmitInfo.deviceMask = 0;
+	
+	// not waiting or signalling any semaphores
+	VkSubmitInfo2 submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+	submitInfo.pNext = nullptr;
+	submitInfo.waitSemaphoreInfoCount = 0;
+	submitInfo.pWaitSemaphoreInfos = nullptr;
+	submitInfo.signalSemaphoreInfoCount = 0;
+	submitInfo.pSignalSemaphoreInfos = nullptr;
+	submitInfo.commandBufferInfoCount = 1;
+	submitInfo.pCommandBufferInfos = &bufferSubmitInfo;
+	
+	VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submitInfo, fence));
+	VK_CHECK(vkWaitForFences(device, 1, &fence, true, 9999999999));
+}
+
+GPUMeshBuffers uploadMesh(VkDevice& device, VmaAllocator& vAllocator, VkCommandBuffer& commandBuffer, VkFence& fence, VkQueue& graphicsQueue, std::span<uint32> indices, std::span<Vertex> vertices)
+{
+	const size_t vertexBufferSize = vertices.size() * sizeof(Vertex);
+	const size_t indexBufferSize = indices.size() * sizeof(uint32);
+	
+	GPUMeshBuffers meshBuffers;
+	VkBufferUsageFlags vertexBufferFlags = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+											VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+											VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	meshBuffers.vertexBuffer = vk_util::createBuffer(vAllocator, vertexBufferSize, vertexBufferFlags, VMA_MEMORY_USAGE_GPU_ONLY);
+	// find address of the vertex buffer
+	VkBufferDeviceAddressInfo deviceAddressInfo = {};
+	deviceAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	deviceAddressInfo.buffer = meshBuffers.vertexBuffer.buffer;
+	meshBuffers.vertexBufferAddress = vkGetBufferDeviceAddress(device, &deviceAddressInfo);
+	
+	VkBufferUsageFlags indexBufferFlags = VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+											VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	meshBuffers.indexBuffer = vk_util::createBuffer(vAllocator, indexBufferSize, indexBufferFlags, VMA_MEMORY_USAGE_GPU_ONLY);
+	
+	// with the device buffers in place, we use a staging buffer we can write from CPU
+	// to seed with the mesh data and then copy overflow
+	AllocatedBuffer staging = vk_util::createBuffer(vAllocator, vertexBufferSize + indexBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	
+	void *data = staging.allocation->GetMappedData();
+	memcpy(data, vertices.data(), vertexBufferSize);
+	memcpy((uint8*)data + vertexBufferSize, indices.data(), indexBufferSize);
+	
+	vulkanImmediateSubmit(device, commandBuffer, fence, graphicsQueue, [&](VkCommandBuffer cmd)
+	{
+		VkBufferCopy vertexCopy { 0 };
+		vertexCopy.dstOffset = 0;
+		vertexCopy.srcOffset = 0;
+		vertexCopy.size = vertexBufferSize;
+		vkCmdCopyBuffer(cmd, staging.buffer, meshBuffers.vertexBuffer.buffer, 1, &vertexCopy);
+		
+		VkBufferCopy indexCopy { 0 };
+		indexCopy.dstOffset = 0; // interesting
+		indexCopy.srcOffset = vertexBufferSize;
+		indexCopy.size = indexBufferSize;
+		vkCmdCopyBuffer(cmd, staging.buffer, meshBuffers.indexBuffer.buffer, 1, &indexCopy);
+	});
+	
+	vk_util::destroyBuffer(vAllocator, staging);
+	
+	return meshBuffers;
+}
+
+void
+vulkanBuildCommandPool(VulkanBackend *backend, const VkAllocationCallbacks* pAllocator)
+{
+	// making a command pool that gives us resetable command buffers for using the whole dang time
+	VkResult poolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->frameData.commandPool);
+	printf("created command pool: %s\n", string_VkResult(poolCreated));
+
+	VkResult commandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->frameData.commandPool, 1, &backend->frameData.graphicsCommandBuffer);
+	printf("allocated graphics command buffer: %s\n", string_VkResult(commandBufferAllocated));
+	
+	// creating another pool for immediate mode commands
+	VkResult immPoolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->immCommandPool);
+	printf("created imm command pool: %s\n", string_VkResult(immPoolCreated));
+	
+	VkResult immCommandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->immCommandPool, 1, &backend->immCommandBuffer);
+	printf("allocated imm command buffer: %s\n", string_VkResult(immCommandBufferAllocated));
+	
+	backend->vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+		vkDestroyCommandPool(be->logicalDevice, be->immCommandPool, nullptr); //pAllocator
+	});
+	
+}
 
 VulkanBackend
 initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceExtensions, uint32 enabledLayerCount, const char **enabledLayers, uint32 deviceExtensionCount, const char **requestedDeviceExtensions, RenderWindowCallback *windowCreationCallback, const VkAllocationCallbacks* pAllocator)
@@ -362,12 +472,12 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	computeLayoutCreateInfo.pSetLayouts = &backend.drawImageDescriptorSetLayout;
 	computeLayoutCreateInfo.setLayoutCount = 1;
 	
-	VkPushConstantRange pushConstant = {};
-	pushConstant.offset = 0;
-	pushConstant.size = sizeof(ComputePushConstants) ;
-	pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	VkPushConstantRange computePushConstant = {};
+	computePushConstant.offset = 0;
+	computePushConstant.size = sizeof(ComputePushConstants);
+	computePushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-	computeLayoutCreateInfo.pPushConstantRanges = &pushConstant;
+	computeLayoutCreateInfo.pPushConstantRanges = &computePushConstant;
 	computeLayoutCreateInfo.pushConstantRangeCount = 1;
 	
 	VkResult computePipelineLayoutCreated = vkCreatePipelineLayout(backend.logicalDevice, &computeLayoutCreateInfo, pAllocator, &backend.gradientPipelineLayout);
@@ -474,6 +584,89 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 		vkDestroyPipelineLayout(be->logicalDevice, be->trianglePipelineLayout, nullptr); //pAllocator
 		vkDestroyPipeline(be->logicalDevice, be->trianglePipeline, nullptr); // pAllocator
 	});
+	
+	// graphics pipeline for triangle mesh shader
+	VkPipelineLayoutCreateInfo triMeshPipelineLayoutInfo = vk_util::defaultPipelineLayoutCreateInfo();
+	
+	VkPushConstantRange bufferRange = {};
+	bufferRange.offset = 0;
+	bufferRange.size = sizeof(GPUDrawPushConstants);
+	bufferRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	triMeshPipelineLayoutInfo.pPushConstantRanges = &bufferRange;
+	triMeshPipelineLayoutInfo.pushConstantRangeCount = 1;
+	
+	VkShaderModule triangleMeshVertexShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle_mesh.vert.spv", backend.logicalDevice, &triangleMeshVertexShader))
+	{
+		printf("failed to load triangle vertex shader");
+	}
+	VkShaderModule triangleMeshFragmentShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle.frag.spv", backend.logicalDevice, &triangleMeshFragmentShader))
+	{
+		printf("failed to load triangle fragment shader");
+	}
+	
+	VkResult triangleMeshPipelineLayoutCreated = vkCreatePipelineLayout(backend.logicalDevice, &triMeshPipelineLayoutInfo, pAllocator, &backend.triangleMeshPipelineLayout);
+	printf("triangle mesh pipeline layout created: %s\n", string_VkResult(triangleMeshPipelineLayoutCreated));
+	
+	vk_util::PipelineBuilder meshPipelineBuilder;
+	meshPipelineBuilder.pipelineLayout = backend.triangleMeshPipelineLayout;
+	meshPipelineBuilder.setShaders(triangleMeshVertexShader, triangleMeshFragmentShader);
+	meshPipelineBuilder.setInputTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+	meshPipelineBuilder.setPolygonMode(VK_POLYGON_MODE_FILL);
+	meshPipelineBuilder.setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+	meshPipelineBuilder.setMultisamplingNone();
+	meshPipelineBuilder.disableBlending();
+	meshPipelineBuilder.disableDepthTest();
+	meshPipelineBuilder.setColorAttachmentFormat(backend.drawImage.imageFormat);
+	meshPipelineBuilder.setDepthFormat(VK_FORMAT_UNDEFINED);
+	
+	backend.triangleMeshPipeline = meshPipelineBuilder.buildPipeline(backend.logicalDevice, pAllocator);
+	
+	vkDestroyShaderModule(backend.logicalDevice, triangleMeshVertexShader, pAllocator);
+	vkDestroyShaderModule(backend.logicalDevice, triangleMeshFragmentShader, pAllocator);
+	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+		vkDestroyPipelineLayout(be->logicalDevice, be->triangleMeshPipelineLayout, nullptr); //pAllocator
+		vkDestroyPipeline(be->logicalDevice, be->triangleMeshPipeline, nullptr); // pAllocator
+	});
+	
+	// init command pools
+	vulkanBuildCommandPool(&backend, pAllocator);
+	
+	// init default data
+	{
+		std::array<Vertex,4> rectVertices;
+
+		rectVertices[0].position = { 0.5, -0.5, 0};
+		rectVertices[1].position = { 0.5,  0.5, 0};
+		rectVertices[2].position = {-0.5, -0.5, 0};
+		rectVertices[3].position = {-0.5,  0.5, 0};
+
+		rectVertices[0].color = {   0,   0,   0, 1};
+		rectVertices[1].color = { 0.5, 0.5, 0.5, 1};
+		rectVertices[2].color = {   1,   0,   0, 1};
+		rectVertices[3].color = {   0,   1,   0, 1};
+
+		std::array<uint32,6> rectIndices;
+
+		rectIndices[0] = 0;
+		rectIndices[1] = 1;
+		rectIndices[2] = 2;
+		
+		rectIndices[3] = 2;
+		rectIndices[4] = 1;
+		rectIndices[5] = 3;
+
+		backend.rectangle = uploadMesh(backend.logicalDevice, backend.vAllocator, backend.immCommandBuffer, backend.immFence, backend.graphicsQueue, rectIndices, rectVertices);
+
+		//delete the rectangle data on engine shutdown
+		backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+			vk_util::destroyBuffer(be->vAllocator, be->rectangle.indexBuffer);
+			vk_util::destroyBuffer(be->vAllocator, be->rectangle.vertexBuffer);
+		});
+
+	}
 	
 	// fucking around
 	#if 0
@@ -608,29 +801,6 @@ cleanupVulkan(VulkanBackend* backend, VkAllocationCallbacks* pAllocator)
 	delete[] backend->renderFinishedSemaphores;
 	
 	// end CPU cleanup section
-}
-
-void
-vulkanBuildCommandPool(VulkanBackend *backend, VkAllocationCallbacks* pAllocator)
-{
-	// making a command pool that gives us resetable command buffers for using the whole dang time
-	VkResult poolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->frameData.commandPool);
-	printf("created command pool: %s\n", string_VkResult(poolCreated));
-
-	VkResult commandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->frameData.commandPool, 1, &backend->frameData.graphicsCommandBuffer);
-	printf("allocated graphics command buffer: %s\n", string_VkResult(commandBufferAllocated));
-	
-	// creating another pool for immediate mode commands
-	VkResult immPoolCreated = vk_util::createCommandPool(backend->logicalDevice, backend->graphicsQueueFamily, pAllocator, &backend->immCommandPool);
-	printf("created imm command pool: %s\n", string_VkResult(immPoolCreated));
-	
-	VkResult immCommandBufferAllocated = vk_util::allocateCommandBuffer(backend->logicalDevice, backend->immCommandPool, 1, &backend->immCommandBuffer);
-	printf("allocated imm command buffer: %s\n", string_VkResult(immCommandBufferAllocated));
-	
-	backend->vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
-		vkDestroyCommandPool(be->logicalDevice, be->immCommandPool, nullptr); //pAllocator
-	});
-	
 }
 
 void
@@ -812,6 +982,8 @@ vulkanDraw(VulkanBackend* backend)
 		renderInfo.pStencilAttachment = nullptr;
 		
 		vkCmdBeginRendering(backend->frameData.graphicsCommandBuffer, &renderInfo);
+		
+		// hardcoded triangle
 		vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, backend->trianglePipeline);
 		
 		// dynamic viewport. Should live elsewhere later
@@ -837,6 +1009,20 @@ vulkanDraw(VulkanBackend* backend)
 		// hard coded to triangle shader that has an array of exactly 3 vertices
 		// vertex count, instance count, first vertex, firstInstance
 		vkCmdDraw(backend->frameData.graphicsCommandBuffer, 3, 1, 0, 0);
+		
+		// triangle mesh
+		vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, backend->triangleMeshPipeline);
+		
+		GPUDrawPushConstants meshPushConstants;
+		meshPushConstants.worldMatrix = glm::mat4{ 1.f };
+		meshPushConstants.vertexBuffer = backend->rectangle.vertexBufferAddress;
+		
+		vkCmdPushConstants(backend->frameData.graphicsCommandBuffer, backend->triangleMeshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &meshPushConstants);
+		
+		vkCmdBindIndexBuffer(backend->frameData.graphicsCommandBuffer, backend->rectangle.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+		
+		// still hard coding the index count, instance count, first index, vertex offset, and first instance
+		vkCmdDrawIndexed(backend->frameData.graphicsCommandBuffer, 6, 1, 0, 0, 0);
 		
 		vkCmdEndRendering(backend->frameData.graphicsCommandBuffer);
 	}
@@ -906,40 +1092,6 @@ vulkanDraw(VulkanBackend* backend)
 	//printf("image presented: %s\n", string_VkResult(presented));
 	
 	backend->frameNumber++;
-}
-
-void vulkanImmediateSubmit(VulkanBackend *backend, std::function<void(VkCommandBuffer cmdBuffer)>&& function)
-{
-	VK_CHECK(vkResetFences(backend->logicalDevice, 1, &backend->immFence));
-	VK_CHECK(vkResetCommandBuffer(backend->immCommandBuffer, 0));
-	
-	VkCommandBufferBeginInfo beginInfo = {};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	
-	VK_CHECK(vkBeginCommandBuffer(backend->immCommandBuffer, &beginInfo));
-	function(backend->immCommandBuffer);
-	VK_CHECK(vkEndCommandBuffer(backend->immCommandBuffer));
-	
-	VkCommandBufferSubmitInfo bufferSubmitInfo = {};
-	bufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-	bufferSubmitInfo.pNext = nullptr;
-	bufferSubmitInfo.commandBuffer = backend->immCommandBuffer;
-	bufferSubmitInfo.deviceMask = 0;
-	
-	// not waiting or signalling any semaphores
-	VkSubmitInfo2 submitInfo = {};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-	submitInfo.pNext = nullptr;
-	submitInfo.waitSemaphoreInfoCount = 0;
-	submitInfo.pWaitSemaphoreInfos = nullptr;
-	submitInfo.signalSemaphoreInfoCount = 0;
-	submitInfo.pSignalSemaphoreInfos = nullptr;
-	submitInfo.commandBufferInfoCount = 1;
-	submitInfo.pCommandBufferInfos = &bufferSubmitInfo;
-	
-	VK_CHECK(vkQueueSubmit2(backend->graphicsQueue, 1, &submitInfo, backend->immFence));
-	VK_CHECK(vkWaitForFences(backend->logicalDevice, 1, &backend->immFence, true, 9999999999));
 }
 
 void
