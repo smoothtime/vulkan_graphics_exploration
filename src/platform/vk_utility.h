@@ -1,3 +1,4 @@
+#if !defined(VK_UTIL_H)
 namespace vk_util{
 	struct DescriptorLayoutBuilder
 	{
@@ -165,3 +166,5 @@ namespace vk_util{
 		return vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, outBuffer);
 	}
 }
+#define VK_UTIL_H
+#endif

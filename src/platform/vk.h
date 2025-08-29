@@ -57,6 +57,20 @@ struct AllocatedImage
 	VkFormat 		imageFormat;
 };
 
+struct ComputePushConstants {
+	glm::vec4 data1;
+	glm::vec4 data2;
+	glm::vec4 data3;
+	glm::vec4 data4;
+};
+
+struct ComputeEffect {
+	const char 		 	 *name;
+	VkPipelineLayout 	 layout;
+	VkPipeline 			 pipeline;
+	ComputePushConstants data;
+};
+
 struct VulkanBackend
 {
 	bool32 				isInitialized;
@@ -87,7 +101,6 @@ struct VulkanBackend
 	VkDescriptorSet 				drawImageDescriptorSet;
 	VkDescriptorSetLayout 			drawImageDescriptorSetLayout;
 	
-	VkPipeline 				gradientPipeline;
 	VkPipelineLayout		gradientPipelineLayout;
 	
 	FrameData 		frameData;
@@ -100,6 +113,9 @@ struct VulkanBackend
 	AllocatedImage 	drawImage;
 	VkExtent2D		drawExtent;
 	
+	std::vector<ComputeEffect> backgroundEffects;
+	uint32 currentBackgroundEffect{0};
+
 	//fucking around
 	VkImage testImage;
 };
@@ -394,19 +410,33 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	computeLayoutCreateInfo.pSetLayouts = &backend.drawImageDescriptorSetLayout;
 	computeLayoutCreateInfo.setLayoutCount = 1;
 	
+	VkPushConstantRange pushConstant = {};
+	pushConstant.offset = 0;
+	pushConstant.size = sizeof(ComputePushConstants) ;
+	pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	computeLayoutCreateInfo.pPushConstantRanges = &pushConstant;
+	computeLayoutCreateInfo.pushConstantRangeCount = 1;
+	
 	VkResult computePipelineLayoutCreated = vkCreatePipelineLayout(backend.logicalDevice, &computeLayoutCreateInfo, pAllocator, &backend.gradientPipelineLayout);
 	printf("compute pipeline layout created: %s\n", string_VkResult(computePipelineLayoutCreated));
 	
-	VkShaderModule computeDrawShader;
-	if (!vk_util::loadShaderModule("..\\shaders\\gradient.comp.spv", backend.logicalDevice, &computeDrawShader))
+	VkShaderModule gradientShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\gradient_color.comp.spv", backend.logicalDevice, &gradientShader))
 	{
 		printf("failed to load shader");
 	}
+	VkShaderModule skyShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\sky.comp.spv", backend.logicalDevice, &skyShader))
+	{
+		printf("failed to load shader");
+	}
+	
 	VkPipelineShaderStageCreateInfo stageCreateInfo = {};
 	stageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stageCreateInfo.pNext = nullptr;
 	stageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	stageCreateInfo.module = computeDrawShader;
+	stageCreateInfo.module = gradientShader;
 	stageCreateInfo.pName = "main";
 	
 	VkComputePipelineCreateInfo computePipelineCreateInfo = {};
@@ -415,14 +445,40 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	computePipelineCreateInfo.layout = backend.gradientPipelineLayout;
 	computePipelineCreateInfo.stage = stageCreateInfo;
 	
-	VkResult computePipelineCreated = vkCreateComputePipelines(backend.logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, pAllocator, &backend.gradientPipeline);
-	printf("compute pipeline created: %s\n", string_VkResult(computePipelineCreated));
+	ComputeEffect gradient;
+	gradient.layout = backend.gradientPipelineLayout;
+	gradient.name = "vertical gradient";
+	gradient.data = {};
+	gradient.data.data1 = glm::vec4(1, 0, 0, 1);
+	gradient.data.data2 = glm::vec4(0, 0, 1, 1);
 	
-	vkDestroyShaderModule(backend.logicalDevice, computeDrawShader, pAllocator);
+	VkResult computePipelineCreated = vkCreateComputePipelines(backend.logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, pAllocator, &gradient.pipeline);
+	printf("gradient pipeline created: %s\n", string_VkResult(computePipelineCreated));
+	
+	// reusing computePipelineCreateInfo and just changing module
+	computePipelineCreateInfo.stage.module = skyShader;
+	
+	ComputeEffect sky;
+	sky.layout = backend.gradientPipelineLayout;
+	sky.name = "sky";
+	sky.data = {};
+	sky.data.data1 = glm::vec4(0.1, 0.2, 0.4 ,0.97);
+	
+	VkResult skyPipelineCreated = vkCreateComputePipelines(backend.logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, pAllocator, &sky.pipeline);
+	printf("sky pipeline created: %s\n", string_VkResult(skyPipelineCreated));
+	
+	backend.backgroundEffects.push_back(gradient);
+	backend.backgroundEffects.push_back(sky);
+	
+	vkDestroyShaderModule(backend.logicalDevice, gradientShader, pAllocator);
+	vkDestroyShaderModule(backend.logicalDevice, skyShader, pAllocator);
 	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend *be){
 		assert(pAllocator == nullptr);
 		vkDestroyPipelineLayout(be->logicalDevice, be->gradientPipelineLayout, pAllocator);
-		vkDestroyPipeline(be->logicalDevice, be->gradientPipeline, pAllocator);
+		for (auto effect : be->backgroundEffects)
+		{
+			vkDestroyPipeline(be->logicalDevice, effect.pipeline, pAllocator);	
+		}
 	});
 	
 	
@@ -623,7 +679,7 @@ void vulkanTransitionImage(VulkanBackend* backend, VkImage image, VkImageAspectF
 	vkCmdPipelineBarrier2(backend->frameData.graphicsCommandBuffer, &dependencyInfo);
 }
 
-void vulkanCopyImage(VulkanBackend* backend, VkImage source, VkImage dest, VkExtent2D sourceSize, VkExtent2D destSize)
+void vulkanCopyImage(VkCommandBuffer commandBuffer, VkImage source, VkImage dest, VkExtent2D sourceSize, VkExtent2D destSize)
 {
 	VkImageBlit2 blitRegion = {};
 	blitRegion.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
@@ -656,7 +712,7 @@ void vulkanCopyImage(VulkanBackend* backend, VkImage source, VkImage dest, VkExt
 	blitInfo.regionCount = 1;
 	blitInfo.pRegions = &blitRegion;
 	
-	vkCmdBlitImage2(backend->frameData.graphicsCommandBuffer, &blitInfo);
+	vkCmdBlitImage2(commandBuffer, &blitInfo);
 }
 
 void
@@ -726,18 +782,23 @@ vulkanDraw(VulkanBackend* backend)
 	#endif
 	#if 1
 	// lol jk we're just running our little compute shader
-	vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backend->gradientPipeline);
-	vkCmdBindDescriptorSets(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backend->gradientPipelineLayout, 0, 1, &backend->drawImageDescriptorSet, 0, nullptr);
+	ComputeEffect currentEffect = backend->backgroundEffects[backend->currentBackgroundEffect];
+	vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.pipeline);
+	vkCmdBindDescriptorSets(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.layout, 0, 1, &backend->drawImageDescriptorSet, 0, nullptr);
+
+	vkCmdPushConstants(backend->frameData.graphicsCommandBuffer, currentEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &currentEffect.data);
+	
 	// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
 	uint32 groupCountX = std::ceil(backend->drawExtent.width / 16.0);
 	uint32 groupCountY = std::ceil(backend->drawExtent.height / 16.0);
 	printf("draw extent is %d by %d dispatching in groups of %d by %d\n", backend->drawImage.imageExtent.width, backend->drawImage.imageExtent.height, groupCountX, groupCountY);
 	vkCmdDispatch(backend->frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
 	#endif
+	
 	// transfer image from drawImage to the swapchain image
 	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	vulkanCopyImage(backend, backend->drawImage.imageHandle, backend->swapchainImageHandles[imageIndex], backend->drawExtent, backend->windowExtent);
+	vulkanCopyImage(backend->frameData.graphicsCommandBuffer, backend->drawImage.imageHandle, backend->swapchainImageHandles[imageIndex], backend->drawExtent, backend->windowExtent);
 	
 	// make swapchain image layout attachment optimal so we can draw immediate mode commands
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -833,6 +894,20 @@ void vulkanImmediateSubmit(VulkanBackend *backend, std::function<void(VkCommandB
 	
 	VK_CHECK(vkQueueSubmit2(backend->graphicsQueue, 1, &submitInfo, backend->immFence));
 	VK_CHECK(vkWaitForFences(backend->logicalDevice, 1, &backend->immFence, true, 9999999999));
+}
+
+void
+vulkanPopulateUIData(VulkanBackend* be, EffectUI *outUI)
+{
+	ComputeEffect &currentEffect = be->backgroundEffects[be->currentBackgroundEffect];
+	outUI->name = currentEffect.name;
+	outUI->pIndex = reinterpret_cast<int32*>(&(be->currentBackgroundEffect));
+	outUI->maxSize = static_cast<int32>(be->backgroundEffects.size() - 1);
+	outUI->data1 = (real32*) &currentEffect.data.data1[0];
+	outUI->data2 = (real32*) &currentEffect.data.data2[0];
+	outUI->data3 = (real32*) &currentEffect.data.data3[0];
+	outUI->data4 = (real32*) &currentEffect.data.data4[0];
+	
 }
 
 #define VK_H

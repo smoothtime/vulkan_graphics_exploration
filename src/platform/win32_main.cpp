@@ -5,9 +5,11 @@
 #include "platform.h"
 #include "win32_main.h"
 
+#include <glm/vec4.hpp>
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#include "ui.h"
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 #include "imgui_impl_vulkan.h"
@@ -266,6 +268,7 @@ WinMain(HINSTANCE instance,
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
 	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
 	vulkanBuildCommandPool(&backend, nullptr);
+	EffectUI effectUI = {};
 	// this initializes the core structures of imgui
 	ImGui::CreateContext();
 	// this initializes imgui for SDL
@@ -299,8 +302,8 @@ WinMain(HINSTANCE instance,
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
-		
-		ImGui::ShowDemoWindow();
+		vulkanPopulateUIData(&backend, &effectUI);
+		buildUI(effectUI);
 		ImGui::Render();
 		
 		vulkanDraw(&backend);
