@@ -17,59 +17,8 @@
             abort();                                                    \
         }                                                               \
     } while (0)
-
+#include "vk_types.h"
 #include "vk_utility.h"
-
-
-
-struct VulkanBackend;
-typedef struct DeletionQueue
-{
-	std::deque<std::function<void(VulkanBackend *)>> deleteFunctions;
-	void pushFunction(std::function<void(VulkanBackend *)>&& function)
-	{
-		deleteFunctions.push_back(function);
-	}
-	
-	void flush(VulkanBackend *backend)
-	{
-		for(auto it = deleteFunctions.rbegin(); it != deleteFunctions.rend(); it++)
-		{
-			(*it)(backend);
-		}
-		deleteFunctions.clear();
-	}
-} DeletionQueue;
-
-struct FrameData
-{
-	VkCommandPool 	commandPool;
-	VkCommandBuffer graphicsCommandBuffer;
-	DeletionQueue 	deletionQueue;
-};
-
-struct AllocatedImage
-{
-	VkImage 		imageHandle;
-	VkImageView 	imageView;
-	VmaAllocation 	allocation;
-	VkExtent3D 		imageExtent;
-	VkFormat 		imageFormat;
-};
-
-struct ComputePushConstants {
-	glm::vec4 data1;
-	glm::vec4 data2;
-	glm::vec4 data3;
-	glm::vec4 data4;
-};
-
-struct ComputeEffect {
-	const char 		 	 *name;
-	VkPipelineLayout 	 layout;
-	VkPipeline 			 pipeline;
-	ComputePushConstants data;
-};
 
 struct VulkanBackend
 {
@@ -111,10 +60,14 @@ struct VulkanBackend
 	VmaAllocator 	vAllocator;
 	
 	AllocatedImage 	drawImage;
-	VkExtent2D		drawExtent;
+	VkExtent2D		drawExtent2D;
 	
 	std::vector<ComputeEffect> backgroundEffects;
 	uint32 currentBackgroundEffect{0};
+	
+	VkPipelineLayout	trianglePipelineLayout;
+	VkPipeline 			trianglePipeline;
+
 
 	//fucking around
 	VkImage testImage;
@@ -404,9 +357,8 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 	});
 	
 	// initialize pipelines
-	VkPipelineLayoutCreateInfo computeLayoutCreateInfo = {};
-	computeLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	computeLayoutCreateInfo.pNext = nullptr;
+	// compute effect pipeline
+	VkPipelineLayoutCreateInfo computeLayoutCreateInfo = vk_util::defaultPipelineLayoutCreateInfo();
 	computeLayoutCreateInfo.pSetLayouts = &backend.drawImageDescriptorSetLayout;
 	computeLayoutCreateInfo.setLayoutCount = 1;
 	
@@ -481,6 +433,47 @@ initializeVulkan(uint32 requestedExtensionCount, const char **requestedInstanceE
 		}
 	});
 	
+	// graphics pipeline for colored triangle shader
+	VkShaderModule triangleVertexShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle.vert.spv", backend.logicalDevice, &triangleVertexShader))
+	{
+		printf("failed to load triangle vertex shader");
+	}
+	VkShaderModule triangleFragmentShader;
+	if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle.frag.spv", backend.logicalDevice, &triangleFragmentShader))
+	{
+		printf("failed to load triangle fragment shader");
+	}
+	
+	VkPipelineLayoutCreateInfo trianglePipelineLayoutInfo = vk_util::defaultPipelineLayoutCreateInfo();
+	VkResult trianglePipelineLayoutCreated = vkCreatePipelineLayout(backend.logicalDevice, &trianglePipelineLayoutInfo, pAllocator, &backend.trianglePipelineLayout);
+	printf("triangle pipeline layout created: %s\n", string_VkResult(trianglePipelineLayoutCreated));
+	
+	vk_util::PipelineBuilder pipelineBuilder;
+	pipelineBuilder.pipelineLayout = backend.trianglePipelineLayout;
+	pipelineBuilder.setShaders(triangleVertexShader, triangleFragmentShader);
+	pipelineBuilder.setInputTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+	pipelineBuilder.setPolygonMode(VK_POLYGON_MODE_FILL);
+	pipelineBuilder.setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+	pipelineBuilder.setMultisamplingNone();
+	pipelineBuilder.disableBlending();
+	pipelineBuilder.disableDepthTest();
+	pipelineBuilder.setColorAttachmentFormat(backend.drawImage.imageFormat);
+	pipelineBuilder.setDepthFormat(VK_FORMAT_UNDEFINED);
+	
+	backend.trianglePipeline = pipelineBuilder.buildPipeline(backend.logicalDevice, pAllocator);
+	if (backend.trianglePipeline == VK_NULL_HANDLE)
+	{
+		printf("do real error handling. triangle pipeline failed to create\n");
+	}
+	
+	vkDestroyShaderModule(backend.logicalDevice, triangleVertexShader, pAllocator);
+	vkDestroyShaderModule(backend.logicalDevice, triangleFragmentShader, pAllocator);
+	
+	backend.vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+		vkDestroyPipelineLayout(be->logicalDevice, be->trianglePipelineLayout, nullptr); //pAllocator
+		vkDestroyPipeline(be->logicalDevice, be->trianglePipeline, nullptr); // pAllocator
+	});
 	
 	// fucking around
 	#if 0
@@ -757,11 +750,11 @@ vulkanDraw(VulkanBackend* backend)
 	VkResult imageAcquired = vkAcquireNextImageKHR(backend->logicalDevice, backend->swapchain, UINT64_MAX, backend->imageAvailableSemaphore, backend->imageAvailableFence, &imageIndex);
 	//printf("image acquired: %s\n", string_VkResult(imageAcquired));
 	
-	backend->drawExtent.width = backend->drawImage.imageExtent.width;
-	backend->drawExtent.height = backend->drawImage.imageExtent.height;
+	backend->drawExtent2D.width = backend->drawImage.imageExtent.width;
+	backend->drawExtent2D.height = backend->drawImage.imageExtent.height;
 	vulkanBeginCommandBuffer(backend);
 	
-	// transition image to be drawable with a pipeline barrier
+	// transition draw image to be drawable with a pipeline barrier
 	VkImageAspectFlags aspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
 	VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkImageLayout newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -780,25 +773,78 @@ vulkanDraw(VulkanBackend* backend)
     clearRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 	vkCmdClearColorImage(backend->frameData.graphicsCommandBuffer, backend->drawImage.imageHandle, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
 	#endif
-	#if 1
-	// lol jk we're just running our little compute shader
-	ComputeEffect currentEffect = backend->backgroundEffects[backend->currentBackgroundEffect];
-	vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.pipeline);
-	vkCmdBindDescriptorSets(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.layout, 0, 1, &backend->drawImageDescriptorSet, 0, nullptr);
-
-	vkCmdPushConstants(backend->frameData.graphicsCommandBuffer, currentEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &currentEffect.data);
 	
-	// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
-	uint32 groupCountX = std::ceil(backend->drawExtent.width / 16.0);
-	uint32 groupCountY = std::ceil(backend->drawExtent.height / 16.0);
-	printf("draw extent is %d by %d dispatching in groups of %d by %d\n", backend->drawImage.imageExtent.width, backend->drawImage.imageExtent.height, groupCountX, groupCountY);
-	vkCmdDispatch(backend->frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
-	#endif
+	// render background with selected compute effect
+	{
+		ComputeEffect currentEffect = backend->backgroundEffects[backend->currentBackgroundEffect];
+		vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.pipeline);
+		vkCmdBindDescriptorSets(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentEffect.layout, 0, 1, &backend->drawImageDescriptorSet, 0, nullptr);
+
+		vkCmdPushConstants(backend->frameData.graphicsCommandBuffer, currentEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &currentEffect.data);
+		
+		// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
+		uint32 groupCountX = std::ceil(backend->drawExtent2D.width / 16.0);
+		uint32 groupCountY = std::ceil(backend->drawExtent2D.height / 16.0);
+		printf("draw extent is %d by %d dispatching in groups of %d by %d\n", backend->drawImage.imageExtent.width, backend->drawImage.imageExtent.height, groupCountX, groupCountY);
+		vkCmdDispatch(backend->frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
+	}
+	// transition draw image for rendering with graphics pipeline
+	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	
+	// render geometry
+	{
+		VkRenderingAttachmentInfo colorAttachment = {};
+		colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+		colorAttachment.pNext = nullptr;
+		colorAttachment.imageView = backend->drawImage.imageView;
+		colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		
+		VkRenderingInfo renderInfo = {};
+		renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+		renderInfo.pNext = nullptr;
+		renderInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, backend->drawExtent2D };
+		renderInfo.layerCount = 1;
+		renderInfo.colorAttachmentCount = 1;
+		renderInfo.pColorAttachments = &colorAttachment;
+		renderInfo.pDepthAttachment = nullptr;
+		renderInfo.pStencilAttachment = nullptr;
+		
+		vkCmdBeginRendering(backend->frameData.graphicsCommandBuffer, &renderInfo);
+		vkCmdBindPipeline(backend->frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, backend->trianglePipeline);
+		
+		// dynamic viewport. Should live elsewhere later
+		VkViewport viewport = {};
+		viewport.x = 0;
+		viewport.y = 0;
+		viewport.width = backend->drawExtent2D.width;
+		viewport.height =backend->drawExtent2D.height;
+		viewport.minDepth = 0.f;
+		viewport.maxDepth = 1.f;
+		
+		vkCmdSetViewport(backend->frameData.graphicsCommandBuffer, 0, 1, &viewport);
+		
+		// dynamic scissor
+		VkRect2D scissor = {};
+		scissor.offset.x = 0;
+		scissor.offset.y = 0;
+		scissor.extent.width = backend->drawImage.imageExtent.width;
+		scissor.extent.height = backend->drawImage.imageExtent.height;
+		
+		vkCmdSetScissor(backend->frameData.graphicsCommandBuffer, 0, 1, &scissor);
+		
+		// hard coded to triangle shader that has an array of exactly 3 vertices
+		// vertex count, instance count, first vertex, firstInstance
+		vkCmdDraw(backend->frameData.graphicsCommandBuffer, 3, 1, 0, 0);
+		
+		vkCmdEndRendering(backend->frameData.graphicsCommandBuffer);
+	}
 	
 	// transfer image from drawImage to the swapchain image
-	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vulkanTransitionImage(backend, backend->drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	vulkanCopyImage(backend->frameData.graphicsCommandBuffer, backend->drawImage.imageHandle, backend->swapchainImageHandles[imageIndex], backend->drawExtent, backend->windowExtent);
+	vulkanCopyImage(backend->frameData.graphicsCommandBuffer, backend->drawImage.imageHandle, backend->swapchainImageHandles[imageIndex], backend->drawExtent2D, backend->windowExtent);
 	
 	// make swapchain image layout attachment optimal so we can draw immediate mode commands
 	vulkanTransitionImage(backend, backend->swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -903,10 +949,10 @@ vulkanPopulateUIData(VulkanBackend* be, EffectUI *outUI)
 	outUI->name = currentEffect.name;
 	outUI->pIndex = reinterpret_cast<int32*>(&(be->currentBackgroundEffect));
 	outUI->maxSize = static_cast<int32>(be->backgroundEffects.size() - 1);
-	outUI->data1 = (real32*) &currentEffect.data.data1[0];
-	outUI->data2 = (real32*) &currentEffect.data.data2[0];
-	outUI->data3 = (real32*) &currentEffect.data.data3[0];
-	outUI->data4 = (real32*) &currentEffect.data.data4[0];
+	outUI->data1 = (real32*) &currentEffect.data.data1;
+	outUI->data2 = (real32*) &currentEffect.data.data2;
+	outUI->data3 = (real32*) &currentEffect.data.data3;
+	outUI->data4 = (real32*) &currentEffect.data.data4;
 	
 }
 

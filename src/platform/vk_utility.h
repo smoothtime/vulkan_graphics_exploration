@@ -165,6 +165,201 @@ namespace vk_util{
 
 		return vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, outBuffer);
 	}
+	
+	VkPipelineLayoutCreateInfo defaultPipelineLayoutCreateInfo()
+	{
+		VkPipelineLayoutCreateInfo info {};
+		info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		info.pNext = nullptr;
+
+		// empty defaults
+		info.flags = 0;
+		info.setLayoutCount = 0;
+		info.pSetLayouts = nullptr;
+		info.pushConstantRangeCount = 0;
+		info.pPushConstantRanges = nullptr;
+		return info;
+	}
+	
+	struct PipelineBuilder
+	{
+		std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+		
+		VkPipelineInputAssemblyStateCreateInfo 	inputAssemblyInfo;
+		VkPipelineRasterizationStateCreateInfo 	rasterizationInfo;
+		VkPipelineColorBlendAttachmentState 	colorBlendAttachmentState;
+		VkPipelineMultisampleStateCreateInfo 	multisampleInfo;
+		VkPipelineLayout						pipelineLayout;
+		VkPipelineDepthStencilStateCreateInfo	depthStencilInfo;
+		VkPipelineRenderingCreateInfo			renderingInfo;
+		VkFormat								colorAttachmentFormat;
+		
+		PipelineBuilder()
+		{
+			// zero initialize everything but the sTypes
+			clear(); 
+		}
+		
+		void clear()
+		{
+			inputAssemblyInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+			rasterizationInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+			colorBlendAttachmentState = {};
+			multisampleInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+			pipelineLayout = {};
+			depthStencilInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+			renderingInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+			shaderStages.clear();
+		}
+		
+		void setShaders(VkShaderModule vertexShader, VkShaderModule fragmentShader)
+		{
+			shaderStages.clear();
+			
+			VkPipelineShaderStageCreateInfo vertexCreateInfo = {};
+			vertexCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			vertexCreateInfo.pNext = nullptr;
+			vertexCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+			vertexCreateInfo.module = vertexShader;
+			vertexCreateInfo.pName = "main";
+			shaderStages.push_back(vertexCreateInfo);
+			
+			VkPipelineShaderStageCreateInfo fragmentCreateInfo = {};
+			fragmentCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			fragmentCreateInfo.pNext = nullptr;
+			fragmentCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			fragmentCreateInfo.module = fragmentShader;
+			fragmentCreateInfo.pName = "main";
+			shaderStages.push_back(fragmentCreateInfo);
+		}
+		
+		void setInputTopology(VkPrimitiveTopology topology)
+		{
+			inputAssemblyInfo.topology = topology;
+			// not currently enabling primitive restart
+			inputAssemblyInfo.primitiveRestartEnable = VK_FALSE;
+		}
+		
+		void setPolygonMode(VkPolygonMode polygonMode)
+		{
+			rasterizationInfo.polygonMode = polygonMode;
+			rasterizationInfo.lineWidth = 1.f; // hardcoded
+		}
+		
+		void setCullMode(VkCullModeFlags cullMode, VkFrontFace frontFace)
+		{
+			rasterizationInfo.cullMode = cullMode;
+			rasterizationInfo.frontFace = frontFace;
+		}
+		
+		void setMultisamplingNone()
+		{
+			multisampleInfo.sampleShadingEnable = VK_FALSE;
+			// one sample per pixel
+			multisampleInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+			multisampleInfo.minSampleShading = 1.0f;
+			multisampleInfo.pSampleMask = nullptr;
+			// no alpha coverage
+			multisampleInfo.alphaToCoverageEnable = VK_FALSE;
+			multisampleInfo.alphaToOneEnable = VK_FALSE;
+		}
+		
+		void setMultiSampling16()
+		{
+			assert(false);
+		}
+		
+		void disableBlending()
+		{
+			// all the bits RGBA
+			colorBlendAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+			colorBlendAttachmentState.blendEnable = VK_FALSE;
+		}
+		
+		void setColorAttachmentFormat(VkFormat format)
+		{
+			colorAttachmentFormat = format;
+			// we're not doing deferred rendering with multiple images so just the one for now
+			renderingInfo.colorAttachmentCount = 1;
+			renderingInfo.pColorAttachmentFormats = &colorAttachmentFormat;
+		}
+		
+		void setDepthFormat(VkFormat format)
+		{
+			renderingInfo.depthAttachmentFormat = format;
+		}
+		
+		void disableDepthTest()
+		{
+			depthStencilInfo.depthTestEnable = VK_FALSE;
+			depthStencilInfo.depthWriteEnable = VK_FALSE;
+			depthStencilInfo.depthCompareOp = VK_COMPARE_OP_NEVER;
+			depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
+			depthStencilInfo.stencilTestEnable = VK_FALSE;
+			depthStencilInfo.front = {};
+			depthStencilInfo.back = {};
+			depthStencilInfo.minDepthBounds = 0.f;
+			depthStencilInfo.maxDepthBounds = 1.f;
+		}
+		
+		VkPipeline buildPipeline(VkDevice device, const VkAllocationCallbacks* pAllocator)
+		{
+			// we're going to use dynamic state for this so bare bones at this point
+			VkPipelineViewportStateCreateInfo viewportStateInfo = {};
+			viewportStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+			viewportStateInfo.pNext = nullptr;
+			viewportStateInfo.viewportCount = 1;
+			viewportStateInfo.scissorCount = 1;
+			
+			// dummy color blending since we aren't handling transparent objects yet
+			VkPipelineColorBlendStateCreateInfo colorBlendInfo = {};
+			colorBlendInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			colorBlendInfo.pNext = nullptr;
+			colorBlendInfo.logicOpEnable = VK_FALSE;
+			colorBlendInfo.logicOp = VK_LOGIC_OP_COPY;
+			colorBlendInfo.attachmentCount = 1;
+			colorBlendInfo.pAttachments = &colorBlendAttachmentState;
+			
+			// not actually using this since we're just sending a data array to the shader and indexing ourselves
+			// open to change in the future
+			VkPipelineVertexInputStateCreateInfo vertextInputInfo = {};
+			vertextInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+			
+			// dynamic state
+			VkDynamicState state[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			VkPipelineDynamicStateCreateInfo dynamicStateInfo = {};
+			dynamicStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+			dynamicStateInfo.pDynamicStates = &state[0];
+			dynamicStateInfo.dynamicStateCount = ArrayCount(state);
+			
+			// graphics pipeline
+			VkGraphicsPipelineCreateInfo pipelineInfo = {};
+			pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			pipelineInfo.pNext = &renderingInfo;
+			pipelineInfo.stageCount = (uint32)shaderStages.size();
+			pipelineInfo.pStages = shaderStages.data();
+			pipelineInfo.pVertexInputState = &vertextInputInfo;
+			pipelineInfo.pInputAssemblyState = &inputAssemblyInfo;
+			pipelineInfo.pViewportState = &viewportStateInfo;
+			pipelineInfo.pRasterizationState = &rasterizationInfo;
+			pipelineInfo.pMultisampleState = &multisampleInfo;
+			pipelineInfo.pColorBlendState = &colorBlendInfo;
+			pipelineInfo.pDepthStencilState = &depthStencilInfo;
+			pipelineInfo.layout = pipelineLayout;
+			pipelineInfo.pDynamicState = &dynamicStateInfo;
+			
+			VkPipeline newPipeline;
+			VkResult pipelineCreated = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, pAllocator, &newPipeline);
+			if (pipelineCreated == VK_SUCCESS)
+			{
+				return newPipeline;
+			} else {
+				printf("failed to create graphics pipeline: %s\n", string_VkResult(pipelineCreated));
+				return VK_NULL_HANDLE;
+			}
+			
+		}
+	};
 }
 #define VK_UTIL_H
 #endif
