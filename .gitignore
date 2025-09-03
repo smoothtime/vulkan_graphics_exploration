@@ -15,3 +15,7 @@ shaders/*.spv
 *.exe
 *.out
 *.app
+
+.history/
+.vscode/
+*.code-workspace

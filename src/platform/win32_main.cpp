@@ -260,19 +260,20 @@ WinMain(HINSTANCE instance,
     memory.permStorage = allTheDamnedMemory;
     memory.transStorage = ((uint8 *)allTheDamnedMemory + memory.permanentStorageSize);
 
-    real32 TargetSecondsPerFrame = 1.0f / (real32)30.0f;
+    real32 TargetSecondsPerFrame = 1.0f / (real32)60.0f;
 	
 	// initialize render backend
 	const char* instanceExtensions[2] = { "VK_KHR_surface", "VK_KHR_win32_surface"};
 	const char* enabledLayers[1] = { "VK_LAYER_KHRONOS_validation" };
 	const char* deviceExtensions[1] = { "VK_KHR_swapchain" };
-	VulkanBackend backend = initializeVulkan(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
+	VulkanBackend backend = {};
+	backend.initialize(ArrayCount(instanceExtensions), instanceExtensions, ArrayCount(enabledLayers), enabledLayers, ArrayCount(deviceExtensions), deviceExtensions, createVulkanSurface, nullptr);
 	EffectUI effectUI = {};
 	// this initializes the core structures of imgui
 	ImGui::CreateContext();
 	// this initializes imgui for SDL
 	ImGui_ImplWin32_Init(Window);
-	initializeImgui(&backend);
+	backend.initializeImgui();
 	
 	OutputDebugStringA("Renderer backend initialized");
 
@@ -301,11 +302,11 @@ WinMain(HINSTANCE instance,
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
-		vulkanPopulateUIData(&backend, &effectUI);
+		backend.populateUIData(&effectUI);
 		buildUI(effectUI);
 		ImGui::Render();
 		
-		vulkanDraw(&backend);
+		backend.draw();
 		
 		
         inputLastFrame = inputForFrame;
@@ -333,6 +334,6 @@ WinMain(HINSTANCE instance,
 			}
 		}
     }
-	cleanupVulkan(&backend, nullptr);
+	backend.cleanup(nullptr);
 	return 0;
 }
