@@ -72,5 +72,19 @@ struct GPUDrawPushConstants
 	VkDeviceAddress vertexBuffer;
 };
 
+struct GeoSurface
+{
+	uint32 startIndex;
+	uint32 count;
+};
+
+struct MeshAsset
+{
+	std::string name;
+	std::vector<GeoSurface> surfaces;
+	
+	GPUMeshBuffers meshBuffers;
+};
+
 #define VK_TYPES_H
 #endif

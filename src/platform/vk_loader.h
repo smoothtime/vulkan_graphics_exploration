@@ -1,151 +1,148 @@
 #if !defined(VK_LOADER_H)
 
-// #include <unordered_map>
-// #include <filesystem>
-// #include <fastgltf/glm_element_traits.hpp>
-// #include <fastgltf/parser.hpp>
-// #include <fastgltf/tools.hpp>
+#include <unordered_map>
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
 
-struct VulkanBackend;
-
-struct GeoSurface
+uint32
+findAttributeIndex(cgltf_primitive &prim, char *name)
 {
-	uint32 startIndex;
-	uint32 count;
-};
 
-struct MeshAsset
-{
-	std::string name;
-	std::vector<GeoSurface> surfaces;
-	
-	GPUMeshBuffers meshBuffers;
-};
-
-/*
-// This feels super C++-y and I might revisit this and do something else
-// optional is a nullable type
-std::optional<std::vector<std::shared_ptr<MeshAsset>>>
-loadGltfMeshes(VulkanBackend* backend, std::filesystem::path filePath)
-{
-	std::cout << "Loading GLTF: " << filePath << std::endl;
-
-    fastgltf::GltfDataBuffer data;
-    data.loadFromFile(filePath);
-
-    constexpr auto gltfOptions = fastgltf::Options::LoadGLBBuffers
-        | fastgltf::Options::LoadExternalBuffers;
-
-    fastgltf::Asset gltf;
-    fastgltf::Parser parser {};
-
-    auto load = parser.loadBinaryGLTF(&data, filePath.parent_path(), gltfOptions);
-    if (load) {
-        gltf = std::move(load.get());
-    } else {
-        printf("Failed to load glTF: %lld \n", fastgltf::to_underlying(load.error()));
-        return {};
-    }
-	
-	    std::vector<std::shared_ptr<MeshAsset>> meshes;
-
-    // use the same vectors for all meshes so that the memory doesnt reallocate as
-    // often
-    std::vector<uint32_t> indices;
-    std::vector<Vertex> vertices;
-    for (fastgltf::Mesh& mesh : gltf.meshes) {
-        MeshAsset newmesh;
-
-        newmesh.name = mesh.name;
-
-        // clear the mesh arrays each mesh, we dont want to merge them by error
-        indices.clear();
-        vertices.clear();
-
-        for (auto&& p : mesh.primitives) {
-            GeoSurface newSurface;
-            newSurface.startIndex = (uint32_t)indices.size();
-            newSurface.count = (uint32_t)gltf.accessors[p.indicesAccessor.value()].count;
-
-            size_t initial_vtx = vertices.size();
-
-            // load indexes
-            {
-                fastgltf::Accessor& indexaccessor = gltf.accessors[p.indicesAccessor.value()];
-                indices.reserve(indices.size() + indexaccessor.count);
-
-                fastgltf::iterateAccessor<std::uint32_t>(gltf, indexaccessor,
-                    [&](std::uint32_t idx) {
-                        indices.push_back(idx + initial_vtx);
-                    });
-            }
-
-            // load vertex positions
-            {
-                fastgltf::Accessor& posAccessor = gltf.accessors[p.findAttribute("POSITION")->second];
-                vertices.resize(vertices.size() + posAccessor.count);
-
-                fastgltf::iterateAccessorWithIndex<glm::vec3>(gltf, posAccessor,
-                    [&](glm::vec3 v, size_t index) {
-                        Vertex newvtx;
-                        newvtx.position = v;
-                        newvtx.normal = { 1, 0, 0 };
-                        newvtx.color = glm::vec4 { 1.f };
-                        newvtx.uvX = 0;
-                        newvtx.uvY = 0;
-                        vertices[initial_vtx + index] = newvtx;
-                    });
-            }
-
-            // load vertex normals
-            auto normals = p.findAttribute("NORMAL");
-            if (normals != p.attributes.end()) {
-
-                fastgltf::iterateAccessorWithIndex<glm::vec3>(gltf, gltf.accessors[(*normals).second],
-                    [&](glm::vec3 v, size_t index) {
-                        vertices[initial_vtx + index].normal = v;
-                    });
-            }
-
-            // load UVs
-            auto uv = p.findAttribute("TEXCOORD_0");
-            if (uv != p.attributes.end()) {
-
-                fastgltf::iterateAccessorWithIndex<glm::vec2>(gltf, gltf.accessors[(*uv).second],
-                    [&](glm::vec2 v, size_t index) {
-                        vertices[initial_vtx + index].uvX = v.x;
-                        vertices[initial_vtx + index].uvY = v.y;
-                    });
-            }
-
-            // load vertex colors
-            auto colors = p.findAttribute("COLOR_0");
-            if (colors != p.attributes.end()) {
-
-                fastgltf::iterateAccessorWithIndex<glm::vec4>(gltf, gltf.accessors[(*colors).second],
-                    [&](glm::vec4 v, size_t index) {
-                        vertices[initial_vtx + index].color = v;
-                    });
-            }
-            newmesh.surfaces.push_back(newSurface);
-        }
-
-        // display the vertex normals
-        constexpr bool OverrideColors = true;
-        if (OverrideColors) {
-            for (Vertex& vtx : vertices) {
-                vtx.color = glm::vec4(vtx.normal, 1.f);
-            }
-        }
-		
-        newmesh.meshBuffers = uploadMesh(backend.logicalDevice, backend.vAllocator, backend.immCommandBuffer, backend.immFence, backend.graphicsQueue, indices, vertices);
-
-        meshes.emplace_back(std::make_shared<MeshAsset>(std::move(newmesh)));
-    }
-
-    return meshes;
+    return 0;
 }
-*/
+
+std::vector<MeshAsset>
+loadGltfMeshes(VulkanBackend* backend, const char *path, int32 *success)
+{
+	cgltf_options options = {};
+    cgltf_data* data = NULL;
+    cgltf_result result = cgltf_parse_file(&options, path, &data);
+    *success = (result == cgltf_result_success);
+    cgltf_result buffersLoaded = cgltf_load_buffers(&options, data, path);
+    *success = (buffersLoaded == cgltf_result_success);
+    std::vector<MeshAsset> assets;
+    *success = (result == cgltf_result_success);
+    if (*success)
+    {
+
+        std::vector<uint32> indices;
+        std::vector<Vertex> vertices;
+        for (uint32 m = 0; m < data->meshes_count; m++)
+        {
+            MeshAsset newMesh;
+            cgltf_mesh  &currentMesh = data->meshes[m];
+            newMesh.name = currentMesh.name;
+            indices.clear();
+            vertices.clear();
+            for(uint32 p = 0; p < currentMesh.primitives_count; p++)
+            {
+                cgltf_primitive *prim = &currentMesh.primitives[p];
+                GeoSurface newSurface;
+                newSurface.startIndex = (uint32)indices.size();
+                newSurface.count = (uint32)prim->indices->count;
+
+                size_t initialVtx = vertices.size();
+                {
+                    indices.reserve(indices.size() + prim->indices->count);
+                    for(uint32 i = 0; i < prim->indices->count; i++)
+                    {
+                        cgltf_size index = cgltf_accessor_read_index(prim->indices, i);
+                        indices.push_back((uint32)(index + initialVtx));
+                    }
+                }
+
+                cgltf_accessor *positions = nullptr;
+                cgltf_accessor *normals = nullptr;
+                cgltf_accessor *uvs = nullptr;
+                cgltf_accessor *colors = nullptr;
+
+                // TODO(james): do we need to call this cgltf_buffer_view_data
+                for (size_t a = 0; a < prim->attributes_count; ++a)
+                {
+                    cgltf_attribute* attribute = &prim->attributes[a];
+                    cgltf_accessor* accessor = attribute->data;
+                    cgltf_size accessorCount = accessor->count;
+                    if (attribute->type == cgltf_attribute_type_position)
+                    {
+                        positions = accessor;
+                    } else if (attribute->type == cgltf_attribute_type_normal)
+                    {
+                        normals = accessor;
+                    } else if (attribute->type == cgltf_attribute_type_texcoord)
+                    {
+                        uvs = accessor;
+                    } else if (attribute->type == cgltf_attribute_type_color)
+                    {
+                        colors = accessor;
+                    }
+                }
+                if (positions == nullptr || positions->count == 0)
+                {
+                    *success = false;
+                    continue;
+                } else
+                {
+                    vertices.reserve(vertices.size() + positions->count);
+                    for (uint32 v = 0; v < positions->count; v++)
+                    {
+                        Vertex vert = {};
+                        *success &= cgltf_accessor_read_float(positions, v, (real32*)&vert.position, 3);
+                        if (!*success)
+                        {
+                            break;
+                        }
+                        vertices.push_back(vert);
+                    }
+                    for (uint32 n = 0; normals !=nullptr && n < normals->count; n++)
+                    {
+                        Vertex &vert = vertices[initialVtx + n];
+                        *success &= cgltf_accessor_read_float(normals, n, (real32*)&vert.normal, 3);
+                        if (!*success)
+                        {
+                            break;
+                        }
+                    }
+                    for (uint32 u = 0; uvs != nullptr && u < uvs->count; u++)
+                    {
+                        real32 uvxy[2];
+                        *success &= cgltf_accessor_read_float(uvs, u, uvxy, 2);
+                        if (!*success)
+                        {
+                            break;
+                        }
+                        vertices[initialVtx + u].uvX = uvxy[0];
+                        vertices[initialVtx + u].uvY = uvxy[1];
+                    }
+                    for (uint32 c = 0; colors != nullptr && c < colors->count; c++)
+                    {
+                        Vertex &vert = vertices[initialVtx + c];
+                        *success &= cgltf_accessor_read_float(normals, c, (real32*)&vert.color, 4);
+                        if (!*success)
+                        {
+                            break;
+                        }
+                    }
+                    constexpr bool OverrideColors = true;
+                    if (OverrideColors) {
+                        for (Vertex& vtx : vertices)
+                        {
+                            vtx.color = glm::vec4(vtx.normal, 1.f);
+                        }
+                    }
+                }
+                newMesh.surfaces.push_back(newSurface);
+            }
+            if (!*success) continue;
+            newMesh.meshBuffers = backend->uploadMesh(indices, vertices);
+            assets.emplace_back(newMesh);
+            // do mesh stuff
+
+        }
+
+        cgltf_free(data);
+    }
+    return assets;
+}
 
 
 #define VK_LOADER_H

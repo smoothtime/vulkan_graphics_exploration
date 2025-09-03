@@ -1,7 +1,11 @@
 #if !defined(MATH_TYPES_H)
 #include <glm/glm.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/transform.hpp>
 
 // uv's interspersed to align GPU reads
+// worth considering if this is better or if we want to struct of arrays this
+// when parsing from file
 struct Vertex
 {
 	glm::vec3 position;

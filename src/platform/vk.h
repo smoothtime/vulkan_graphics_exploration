@@ -20,7 +20,6 @@
     } while (0)
 #include "vk_types.h"
 #include "vk_utility.h"
-#include "vk_loader.h"
 
 struct VulkanBackend
 {
@@ -77,7 +76,7 @@ struct VulkanBackend
 	GPUMeshBuffers		rectangle;
 	// homie do we really want a vector of shared pointers flying around?
 	// homie you do not. Let's keep track of these explicitly when out of tutorial land
-	std::vector<std::shared_ptr<MeshAsset>> testMeshes;
+	std::vector<MeshAsset> testMeshes;
 
 	// fucking around
 	VkImage testImage;
@@ -661,13 +660,15 @@ struct VulkanBackend
 		
 		// GPU cleanup section
 		vkDeviceWaitIdle(logicalDevice);
-		
+	
+		for (auto mesh : testMeshes)
+		{
+			vk_util::destroyBuffer(vAllocator, mesh.meshBuffers.indexBuffer);
+			vk_util::destroyBuffer(vAllocator, mesh.meshBuffers.vertexBuffer);
+		}
 		vulkanDeletionQueue.flush(this);
 		frameData.deletionQueue.flush(this);
 		
-		// TODO(James) vkFreeMemory when we have VkDeviceMemory's
-		// TODO(James) vkDestroyBuffer when we have them
-		// TODO(James) vkDestroyPipeline when we have them
 		// TODO(James) vkDestroyPipelineLayout when we have them
 		// TODO(James) vkDestroyPipelineLayout when we have them
 		// TODO(James) vkDestroyDescriptorSetLayout when we have them
@@ -1024,7 +1025,7 @@ struct VulkanBackend
 			// vertex count, instance count, first vertex, firstInstance
 			vkCmdDraw(frameData.graphicsCommandBuffer, 3, 1, 0, 0);
 			
-			// triangle mesh
+			// triangle mesh rectangle
 			vkCmdBindPipeline(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipeline);
 			
 			GPUDrawPushConstants meshPushConstants;
@@ -1037,6 +1038,23 @@ struct VulkanBackend
 			
 			// still hard coding the index count, instance count, first index, vertex offset, and first instance
 			vkCmdDrawIndexed(frameData.graphicsCommandBuffer, 6, 1, 0, 0, 0);
+
+			// monkey
+			{
+				glm::mat4 view = glm::translate(glm::vec3{ 0,0,-5 });
+				// camera projection
+				glm::mat4 projection = glm::perspective(glm::radians(70.f), (real32)drawExtent2D.width / (real32)drawExtent2D.height, 10000.f, 0.1f);
+
+				// invert the Y direction on projection matrix so that we are more similar
+				// to opengl and gltf axis
+				projection[1][1] *= -1;
+
+				//meshPushConstants.worldMatrix = projection * view;
+				meshPushConstants.vertexBuffer = testMeshes[2].meshBuffers.vertexBufferAddress;
+				vkCmdPushConstants(frameData.graphicsCommandBuffer, triangleMeshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &meshPushConstants);
+				vkCmdBindIndexBuffer(frameData.graphicsCommandBuffer, testMeshes[2].meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+				vkCmdDrawIndexed(frameData.graphicsCommandBuffer, testMeshes[2].surfaces[0].count, 1, testMeshes[2].surfaces[0].startIndex, 0, 0);
+			}
 			
 			vkCmdEndRendering(frameData.graphicsCommandBuffer);
 		}

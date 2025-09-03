@@ -16,6 +16,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #define RENDER_WINDOW_CALLBACK(functionName) VkResult functionName(VkInstance *pInstance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
 typedef RENDER_WINDOW_CALLBACK(RenderWindowCallback);
 #include "vk.h"
+#include "vk_loader.h"
 
 static bool32 GLOBAL_RUNNING = true;
 static int64 GLOBAL_PERF_COUNT_FREQ = 0;
@@ -274,6 +275,9 @@ WinMain(HINSTANCE instance,
 	// this initializes imgui for SDL
 	ImGui_ImplWin32_Init(Window);
 	backend.initializeImgui();
+	int32 loadedMeshes = true;
+	backend.testMeshes = loadGltfMeshes(&backend, "../data/basicmesh.glb", &loadedMeshes);
+	assert(loadedMeshes);
 	
 	OutputDebugStringA("Renderer backend initialized");
 
