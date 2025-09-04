@@ -323,6 +323,19 @@ namespace vk_util{
 			depthStencilInfo.minDepthBounds = 0.f;
 			depthStencilInfo.maxDepthBounds = 1.f;
 		}
+
+		void enableDepthTest(bool depthWriteEnable, VkCompareOp compareOp)
+		{
+			depthStencilInfo.depthTestEnable = VK_TRUE;
+			depthStencilInfo.depthWriteEnable = depthWriteEnable;
+			depthStencilInfo.depthCompareOp = compareOp;
+			depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
+			depthStencilInfo.stencilTestEnable = VK_FALSE;
+			depthStencilInfo.front = {};
+			depthStencilInfo.back = {};
+			depthStencilInfo.minDepthBounds = 0.f;
+			depthStencilInfo.maxDepthBounds = 1.f;
+		}
 		
 		VkPipeline buildPipeline(VkDevice device, const VkAllocationCallbacks* pAllocator)
 		{

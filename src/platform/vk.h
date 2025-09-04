@@ -61,6 +61,7 @@ struct VulkanBackend
 	VmaAllocator 	vAllocator;
 	
 	AllocatedImage 	drawImage;
+	AllocatedImage	depthImage;
 	VkExtent2D		drawExtent2D;
 	
 	std::vector<ComputeEffect> backgroundEffects;
@@ -367,6 +368,46 @@ struct VulkanBackend
 			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, pAllocator);
 		});
 		
+		// initialize the depth image
+		depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
+		depthImage.imageExtent = drawImageExtent;
+		VkImageUsageFlags depthImageUsageFlags = {};
+		depthImageUsageFlags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+		VkImageCreateInfo depthCreateInfo = {};
+		depthCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		depthCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+		depthCreateInfo.format = depthImage.imageFormat;
+		depthCreateInfo.extent = depthImage.imageExtent;
+		depthCreateInfo.usage = depthImageUsageFlags;
+		depthCreateInfo.arrayLayers = 1; //hardcoded
+		depthCreateInfo.mipLevels = 1; // hardcoded
+		depthCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT; // hardcoded
+
+		// reusing allocationCreateInfo from drawImage
+		vmaCreateImage(vAllocator, &depthCreateInfo, &allocationCreateInfo, &depthImage.imageHandle, &depthImage.allocation, nullptr);
+
+		VkImageViewCreateInfo depthImageViewCreateInfo = {};
+		depthImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		depthImageViewCreateInfo.pNext = nullptr;
+		depthImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		depthImageViewCreateInfo.image = depthImage.imageHandle;
+		depthImageViewCreateInfo.format = depthImage.imageFormat;
+		depthImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+		depthImageViewCreateInfo.subresourceRange.levelCount = 1;
+		depthImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+		depthImageViewCreateInfo.subresourceRange.layerCount = 1;
+		depthImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+
+		VkResult depthImageViewCreated = vkCreateImageView(logicalDevice, &depthImageViewCreateInfo, pAllocator, &depthImage.imageView);
+		printf("depth image view created: %s\n", string_VkResult(depthImageViewCreated));
+		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
+			assert(pAllocator == nullptr);
+			vkDestroyImageView(be->logicalDevice, be->depthImage.imageView, pAllocator);
+			vmaDestroyImage(be->vAllocator, be->depthImage.imageHandle, be->depthImage.allocation);
+		});
+		
+
 		// initialize pipelines
 		// compute effect pipeline
 		VkPipelineLayoutCreateInfo computeLayoutCreateInfo = vk_util::defaultPipelineLayoutCreateInfo();
@@ -519,9 +560,10 @@ struct VulkanBackend
 		meshPipelineBuilder.setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
 		meshPipelineBuilder.setMultisamplingNone();
 		meshPipelineBuilder.disableBlending();
-		meshPipelineBuilder.disableDepthTest();
+		//meshPipelineBuilder.disableDepthTest();
+		meshPipelineBuilder.enableDepthTest(true, VK_COMPARE_OP_GREATER);
 		meshPipelineBuilder.setColorAttachmentFormat(drawImage.imageFormat);
-		meshPipelineBuilder.setDepthFormat(VK_FORMAT_UNDEFINED);
+		meshPipelineBuilder.setDepthFormat(depthImage.imageFormat);
 		
 		triangleMeshPipeline = meshPipelineBuilder.buildPipeline(logicalDevice, pAllocator);
 		
@@ -539,10 +581,10 @@ struct VulkanBackend
 		{
 			std::array<Vertex,4> rectVertices;
 
-			rectVertices[0].position = { 0.5, -0.5, 0};
-			rectVertices[1].position = { 0.5,  0.5, 0};
-			rectVertices[2].position = {-0.5, -0.5, 0};
-			rectVertices[3].position = {-0.5,  0.5, 0};
+			rectVertices[0].position = { 4.5, -2.5, -2};
+			rectVertices[1].position = { 4.5,  2.5, -2};
+			rectVertices[2].position = {-4.5, -2.5, -2};
+			rectVertices[3].position = {-4.5,  2.5, -2};
 
 			rectVertices[0].color = {   0,   0,   0, 1};
 			rectVertices[1].color = { 0.5, 0.5, 0.5, 1};
@@ -940,10 +982,11 @@ struct VulkanBackend
 		beginCommandBuffer();
 		
 		// transition draw image to be drawable with a pipeline barrier
-		VkImageAspectFlags aspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
+		VkImageAspectFlags colorAspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
+		VkImageAspectFlags depthAspectFlags = VK_IMAGE_ASPECT_DEPTH_BIT;
 		VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		VkImageLayout newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		transitionImage(drawImage.imageHandle, aspectFlags, oldLayout, newLayout);
+		transitionImage(drawImage.imageHandle, colorAspectFlags, oldLayout, newLayout);
 		
 		// translate commands for frame to vk commands
 		#if 0
@@ -974,8 +1017,10 @@ struct VulkanBackend
 			vkCmdDispatch(frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
 		}
 		// transition draw image for rendering with graphics pipeline
-		transitionImage(drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-		
+		transitionImage(drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		// transition depth image
+		transitionImage(depthImage.imageHandle, depthAspectFlags, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+
 		// render geometry
 		{
 			VkRenderingAttachmentInfo colorAttachment = {};
@@ -985,6 +1030,15 @@ struct VulkanBackend
 			colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+			VkRenderingAttachmentInfo depthAttachment = {};
+			depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+			depthAttachment.pNext = nullptr;
+			depthAttachment.imageView = depthImage.imageView;
+			depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			depthAttachment.clearValue.depthStencil.depth = 0.f;
 			
 			VkRenderingInfo renderInfo = {};
 			renderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -993,7 +1047,7 @@ struct VulkanBackend
 			renderInfo.layerCount = 1;
 			renderInfo.colorAttachmentCount = 1;
 			renderInfo.pColorAttachments = &colorAttachment;
-			renderInfo.pDepthAttachment = nullptr;
+			renderInfo.pDepthAttachment = &depthAttachment;
 			renderInfo.pStencilAttachment = nullptr;
 			
 			vkCmdBeginRendering(frameData.graphicsCommandBuffer, &renderInfo);
@@ -1029,7 +1083,17 @@ struct VulkanBackend
 			vkCmdBindPipeline(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipeline);
 			
 			GPUDrawPushConstants meshPushConstants;
-			meshPushConstants.worldMatrix = glm::mat4{ 1.f };
+
+			glm::mat4 view = glm::translate(glm::vec3{ 0, 0, -5 });
+			// camera projection 10000 to the “near” and 0.1 to the “far”.
+			glm::mat4 projection = glm::perspective(glm::radians(70.f), (real32)drawExtent2D.width / (real32)drawExtent2D.height, 10000.f, 0.1f);
+
+			// invert the Y direction on projection matrix so that we are more similar
+			// to opengl and gltf axis
+			projection[1][1] *= -1;
+
+			meshPushConstants.worldMatrix = projection * view;
+			//meshPushConstants.worldMatrix = glm::mat4{ 1.f };
 			meshPushConstants.vertexBuffer = rectangle.vertexBufferAddress;
 			
 			vkCmdPushConstants(frameData.graphicsCommandBuffer, triangleMeshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &meshPushConstants);
@@ -1041,15 +1105,6 @@ struct VulkanBackend
 
 			// monkey
 			{
-				glm::mat4 view = glm::translate(glm::vec3{ 0,0,-5 });
-				// camera projection
-				glm::mat4 projection = glm::perspective(glm::radians(70.f), (real32)drawExtent2D.width / (real32)drawExtent2D.height, 10000.f, 0.1f);
-
-				// invert the Y direction on projection matrix so that we are more similar
-				// to opengl and gltf axis
-				projection[1][1] *= -1;
-
-				//meshPushConstants.worldMatrix = projection * view;
 				meshPushConstants.vertexBuffer = testMeshes[2].meshBuffers.vertexBufferAddress;
 				vkCmdPushConstants(frameData.graphicsCommandBuffer, triangleMeshPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &meshPushConstants);
 				vkCmdBindIndexBuffer(frameData.graphicsCommandBuffer, testMeshes[2].meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1060,7 +1115,7 @@ struct VulkanBackend
 		}
 		
 		// transfer image from drawImage to the swapchain image
-		transitionImage(drawImage.imageHandle, aspectFlags, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		transitionImage(drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		transitionImage(swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		copyImage(frameData.graphicsCommandBuffer, drawImage.imageHandle, swapchainImageHandles[imageIndex], drawExtent2D, windowExtent);
 		

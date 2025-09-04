@@ -1,5 +1,4 @@
 #if !defined(MATH_TYPES_H)
-#include <glm/glm.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/transform.hpp>
 
