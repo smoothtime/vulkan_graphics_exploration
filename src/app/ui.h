@@ -8,12 +8,15 @@ struct EffectUI
 	real32 *data2;
 	real32 *data3;
 	real32 *data4;
+
+	real32* renderScale;
 };
 
 void buildUI(EffectUI &effectData)
 {
 	if (ImGui::Begin("background"))
 	{
+		ImGui::SliderFloat("Render Scale", effectData.renderScale, 0.3f, 1.f);
 		ImGui::Text("Selected effect: %s", effectData.name);
 		ImGui::SliderInt("Effect Index", effectData.pIndex, 0, effectData.maxSize);
 		ImGui::InputFloat4("data1 ", effectData.data1);

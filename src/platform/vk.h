@@ -24,6 +24,7 @@
 struct VulkanBackend
 {
 	bool32 				isInitialized;
+	bool32				resizeRequested;
 	uint32 				frameNumber;
 	VkExtent2D 			windowExtent;
 	VkInstance 			instance;
@@ -59,10 +60,12 @@ struct VulkanBackend
 	DeletionQueue 	vulkanDeletionQueue;
 	
 	VmaAllocator 	vAllocator;
+	const VkAllocationCallbacks* pAllocator;
 	
 	AllocatedImage 	drawImage;
 	AllocatedImage	depthImage;
 	VkExtent2D		drawExtent2D;
+	real32 			renderScale;
 	
 	std::vector<ComputeEffect> backgroundEffects;
 	uint32 currentBackgroundEffect{0};
@@ -83,11 +86,101 @@ struct VulkanBackend
 	VkImage testImage;
 
 	void
-	initialize(uint32 requestedExtensionCount, const char **requestedInstanceExtensions, uint32 enabledLayerCount, const char **enabledLayers, uint32 deviceExtensionCount, const char **requestedDeviceExtensions, RenderWindowCallback *windowCreationCallback, const VkAllocationCallbacks* pAllocator)
+	createSwapchain(bool32 isRecreate)
+	{
+		VkSwapchainCreateInfoKHR swapchainCreateInfo = {};
+		swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+		swapchainCreateInfo.surface = surface;
+		swapchainCreateInfo.minImageCount = 2;
+		swapchainCreateInfo.imageFormat = chosenSurfaceFormat.format;
+		swapchainCreateInfo.imageColorSpace = chosenSurfaceFormat.colorSpace;
+		swapchainCreateInfo.imageExtent = windowExtent;
+		swapchainCreateInfo.imageArrayLayers = 1;
+		swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		// we're not using VK_SHARING_MODE_CONCURRENT so these queue family settings doesn't matter
+		swapchainCreateInfo.queueFamilyIndexCount = 0;
+		swapchainCreateInfo.pQueueFamilyIndices = VK_NULL_HANDLE;
+		swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+		swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+		swapchainCreateInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+		// If I ever write a fragment shader with a side effect or want to read back an image before presentation or after reacquisition, then I may want to change this back
+		swapchainCreateInfo.clipped = VK_TRUE;
+		swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+		VkResult createSwapchainResult = vkCreateSwapchainKHR(logicalDevice, &swapchainCreateInfo, pAllocator, &swapchain);
+		printf("created swapchain: %s\n", string_VkResult(createSwapchainResult));
+
+		uint32 oldSwapchainImageCount = swapchainImageCount;
+		vkGetSwapchainImagesKHR(logicalDevice, swapchain, &swapchainImageCount, nullptr);
+		if (isRecreate)
+		{
+			// if recreating, you better hope we don't need to recreate the semaphores
+			assert(oldSwapchainImageCount == swapchainImageCount);
+			assert(renderFinishedSemaphores != nullptr);
+			assert(swapchainImageHandles != nullptr);
+			assert(swapchainImageViews != nullptr);
+		} else
+		{
+			swapchainImageHandles = new VkImage[swapchainImageCount];
+			swapchainImageViews = new VkImageView[swapchainImageCount];
+		}
+		vkGetSwapchainImagesKHR(logicalDevice, swapchain, &swapchainImageCount, swapchainImageHandles);
+		
+		for(uint32 i = 0; i< swapchainImageCount; i++)
+		{
+			VkImageViewCreateInfo swapchainImageViewCreateInfo = {};
+			swapchainImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			swapchainImageViewCreateInfo.flags = 0;
+			swapchainImageViewCreateInfo.image = swapchainImageHandles[i];
+			swapchainImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			swapchainImageViewCreateInfo.format = chosenSurfaceFormat.format;
+			swapchainImageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+			swapchainImageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+			swapchainImageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+			swapchainImageViewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+			swapchainImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			swapchainImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+			swapchainImageViewCreateInfo.subresourceRange.levelCount = 1;
+			swapchainImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+			swapchainImageViewCreateInfo.subresourceRange.layerCount = 1;
+			
+			vkCreateImageView(logicalDevice, &swapchainImageViewCreateInfo, pAllocator, &swapchainImageViews[i]);
+		}
+	}
+
+	void destroySwapchain(bool32 willRecreate)
+	{
+		for (uint32 i = 0; i < swapchainImageCount; i++)
+		{
+			vkDestroyImageView(logicalDevice, swapchainImageViews[i], pAllocator);
+			if(!willRecreate)
+			{
+				vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], pAllocator);
+			}
+		}
+		vkDestroySwapchainKHR(logicalDevice, swapchain, pAllocator);
+	}
+
+	void
+	resizeSwapchain(uint32 newWidth, uint32 newHeight)
+	{
+		// TODO(james): look into if it's worth it to keep around a handle
+		// to the old swapchain to pass into VkSwapchainCreateInfoKHR's oldSwapchain
+		vkDeviceWaitIdle(logicalDevice);
+		destroySwapchain(true);
+		windowExtent.width = newWidth;
+		windowExtent.height = newHeight;
+		createSwapchain(true);
+		resizeRequested = false;
+	}
+
+	void
+	initialize(uint32 requestedExtensionCount, const char **requestedInstanceExtensions, uint32 enabledLayerCount, const char **enabledLayers, uint32 deviceExtensionCount, const char **requestedDeviceExtensions, RenderWindowCallback *windowCreationCallback, const VkAllocationCallbacks* allocCallbacks)
 	{
 		isInitialized = true;
 		instance = {};
 		physicalDevice = {};
+		pAllocator = allocCallbacks;
 	
 		VkApplicationInfo applicationInfo = {};
 		applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -197,31 +290,8 @@ struct VulkanBackend
 		}
 		delete[] surfaceFormats;
 		
-		VkSwapchainCreateInfoKHR swapchainCreateInfo = {};
-		swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-		swapchainCreateInfo.surface = surface;
-		swapchainCreateInfo.minImageCount = 2;
-		swapchainCreateInfo.imageFormat = chosenSurfaceFormat.format;
-		swapchainCreateInfo.imageColorSpace = chosenSurfaceFormat.colorSpace;
-		swapchainCreateInfo.imageExtent = windowExtent;
-		swapchainCreateInfo.imageArrayLayers = 1;
-		swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-		swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		// we're not using VK_SHARING_MODE_CONCURRENT so these queue family settings doesn't matter
-		swapchainCreateInfo.queueFamilyIndexCount = 0;
-		swapchainCreateInfo.pQueueFamilyIndices = VK_NULL_HANDLE;
-		swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-		swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-		swapchainCreateInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-		// If I ever write a fragment shader with a side effect or want to read back an image before presentation or after reacquisition, then I may want to change this back
-		swapchainCreateInfo.clipped = VK_TRUE;
-		swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
-		VkResult createSwapchainResult = vkCreateSwapchainKHR(logicalDevice, &swapchainCreateInfo, pAllocator, &swapchain);
-		printf("created swapchain: %s\n", string_VkResult(createSwapchainResult));
+		createSwapchain(false);
 		
-		vkGetSwapchainImagesKHR(logicalDevice, swapchain, &swapchainImageCount, nullptr);
-		swapchainImageHandles = new VkImage[swapchainImageCount];
-		vkGetSwapchainImagesKHR(logicalDevice, swapchain, &swapchainImageCount, swapchainImageHandles);
 		
 		VkSemaphoreCreateInfo semaphoreCreateInfo = {};
 		semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -236,28 +306,9 @@ struct VulkanBackend
 		VkResult fenceCreated = vkCreateFence(logicalDevice, &fenceCreateInfo, pAllocator, &imageAvailableFence);
 		printf("created swapchain fence: %s\n", string_VkResult(fenceCreated));
 		
-		swapchainImageViews = new VkImageView[swapchainImageCount];
 		renderFinishedSemaphores = new VkSemaphore[swapchainImageCount];
-		for(uint32 i = 0; i< swapchainImageCount; i++)
+		for(uint32 i = 0; i < swapchainImageCount; i++)
 		{
-			VkImageViewCreateInfo swapchainImageViewCreateInfo = {};
-			swapchainImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-			swapchainImageViewCreateInfo.flags = 0;
-			swapchainImageViewCreateInfo.image = swapchainImageHandles[i];
-			swapchainImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			swapchainImageViewCreateInfo.format = chosenSurfaceFormat.format;
-			swapchainImageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-			swapchainImageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-			swapchainImageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-			swapchainImageViewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-			swapchainImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			swapchainImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
-			swapchainImageViewCreateInfo.subresourceRange.levelCount = 1;
-			swapchainImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-			swapchainImageViewCreateInfo.subresourceRange.layerCount = 1;
-			
-			vkCreateImageView(logicalDevice, &swapchainImageViewCreateInfo, pAllocator, &swapchainImageViews[i]);
-			
 			// reusing semaphore create info and VkResult
 			semaphoreCreated = vkCreateSemaphore(logicalDevice, &semaphoreCreateInfo, pAllocator, &renderFinishedSemaphores[i]);
 			printf("created render semaphore: %s\n", string_VkResult(semaphoreCreated));
@@ -269,7 +320,7 @@ struct VulkanBackend
 		fenceCreated = vkCreateFence(logicalDevice, &fenceCreateInfo, pAllocator, &immFence);
 		printf("created imm fence: %s\n", string_VkResult(fenceCreated));
 		vulkanDeletionQueue.pushFunction([=](VulkanBackend* be) {
-			vkDestroyFence(be->logicalDevice, be->immFence, nullptr); //pAllocator
+			vkDestroyFence(be->logicalDevice, be->immFence, be->pAllocator);
 		});
 		
 		// Initialize allocator for images and buffers and what have you
@@ -289,6 +340,7 @@ struct VulkanBackend
 			windowExtent.height,
 			1
 		};
+		renderScale = 1.f;
 		
 		drawImage.imageExtent = drawImageExtent;
 		drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT; // hard coded
@@ -329,8 +381,7 @@ struct VulkanBackend
 		VkResult drawImageViewCreated = vkCreateImageView(logicalDevice, &drawImageViewCreateInfo, pAllocator, &drawImage.imageView);
 		printf("draw image view created: %s\n", string_VkResult(drawImageViewCreated));
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			assert(pAllocator == nullptr);
-			vkDestroyImageView(be->logicalDevice, be->drawImage.imageView, pAllocator);
+			vkDestroyImageView(be->logicalDevice, be->drawImage.imageView, be->pAllocator);
 			vmaDestroyImage(be->vAllocator, be->drawImage.imageHandle, be->drawImage.allocation);
 		});
 		
@@ -363,9 +414,8 @@ struct VulkanBackend
 		vkUpdateDescriptorSets(logicalDevice, 1, &drawImageWrite, 0, nullptr);
 		
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			assert(pAllocator == nullptr);
-			be->globalDescriptorAllocator.destroyPool(be->logicalDevice, pAllocator);
-			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, pAllocator);
+			be->globalDescriptorAllocator.destroyPool(be->logicalDevice, be->pAllocator);
+			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
 		});
 		
 		// initialize the depth image
@@ -402,8 +452,7 @@ struct VulkanBackend
 		VkResult depthImageViewCreated = vkCreateImageView(logicalDevice, &depthImageViewCreateInfo, pAllocator, &depthImage.imageView);
 		printf("depth image view created: %s\n", string_VkResult(depthImageViewCreated));
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			assert(pAllocator == nullptr);
-			vkDestroyImageView(be->logicalDevice, be->depthImage.imageView, pAllocator);
+			vkDestroyImageView(be->logicalDevice, be->depthImage.imageView, be->pAllocator);
 			vmaDestroyImage(be->vAllocator, be->depthImage.imageHandle, be->depthImage.allocation);
 		});
 		
@@ -477,11 +526,10 @@ struct VulkanBackend
 		vkDestroyShaderModule(logicalDevice, gradientShader, pAllocator);
 		vkDestroyShaderModule(logicalDevice, skyShader, pAllocator);
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be){
-			assert(pAllocator == nullptr);
-			vkDestroyPipelineLayout(be->logicalDevice, be->gradientPipelineLayout, pAllocator);
+			vkDestroyPipelineLayout(be->logicalDevice, be->gradientPipelineLayout, be->pAllocator);
 			for (auto effect : be->backgroundEffects)
 			{
-				vkDestroyPipeline(be->logicalDevice, effect.pipeline, pAllocator);	
+				vkDestroyPipeline(be->logicalDevice, effect.pipeline, be->pAllocator);	
 			}
 		});
 		
@@ -523,8 +571,8 @@ struct VulkanBackend
 		vkDestroyShaderModule(logicalDevice, triangleFragmentShader, pAllocator);
 		
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
-			vkDestroyPipelineLayout(be->logicalDevice, be->trianglePipelineLayout, nullptr); //pAllocator
-			vkDestroyPipeline(be->logicalDevice, be->trianglePipeline, nullptr); // pAllocator
+			vkDestroyPipelineLayout(be->logicalDevice, be->trianglePipelineLayout, be->pAllocator);
+			vkDestroyPipeline(be->logicalDevice, be->trianglePipeline, be->pAllocator);
 		});
 		
 		// graphics pipeline for triangle mesh shader
@@ -570,12 +618,12 @@ struct VulkanBackend
 		vkDestroyShaderModule(logicalDevice, triangleMeshVertexShader, pAllocator);
 		vkDestroyShaderModule(logicalDevice, triangleMeshFragmentShader, pAllocator);
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
-			vkDestroyPipelineLayout(be->logicalDevice, be->triangleMeshPipelineLayout, nullptr); //pAllocator
-			vkDestroyPipeline(be->logicalDevice, be->triangleMeshPipeline, nullptr); // pAllocator
+			vkDestroyPipelineLayout(be->logicalDevice, be->triangleMeshPipelineLayout, be->pAllocator);
+			vkDestroyPipeline(be->logicalDevice, be->triangleMeshPipeline, be->pAllocator);
 		});
 		
 		// init command pools
-		buildCommandPool(pAllocator);
+		buildCommandPool();
 		
 		// init default data
 		{
@@ -629,7 +677,7 @@ struct VulkanBackend
 		VkResult result = vkCreateImage(logicalDevice, &createInfo, pAllocator, &testImage);
 		printf("result: %s\n", string_VkResult(result));
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend* be){
-			vkDestroyImage(be->logicalDevice, be->testImage, pAllocator);
+			vkDestroyImage(be->logicalDevice, be->testImage, be->pAllocator);
 		});
 			
 		#endif
@@ -696,8 +744,9 @@ struct VulkanBackend
 			vkDestroyDescriptorPool(be->logicalDevice, imguiPool, nullptr);
 		});
 	}
+
 	void
-	cleanup(VkAllocationCallbacks* pAllocator)
+	cleanup()
 	{
 		
 		// GPU cleanup section
@@ -717,13 +766,7 @@ struct VulkanBackend
 		// TODO(James) vkDestroyDescriptorPool when we have them
 		vkDestroyCommandPool(logicalDevice, frameData.commandPool, pAllocator);
 		
-		for(uint32 i = 0; i <swapchainImageCount; i++)
-		{
-			vkDestroyImageView(logicalDevice, swapchainImageViews[i], pAllocator);
-			vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], pAllocator);
-		}
-		
-		vkDestroySwapchainKHR(logicalDevice, swapchain, pAllocator);
+		destroySwapchain(false);
 		
 		vkDestroyFence(logicalDevice, imageAvailableFence, pAllocator);
 		vkDestroyFence(logicalDevice, syncHostWithDeviceFence, pAllocator);
@@ -748,7 +791,7 @@ struct VulkanBackend
 
 
 	void
-	buildCommandPool(const VkAllocationCallbacks* pAllocator)
+	buildCommandPool()
 	{
 		// making a command pool that gives us resetable command buffers for using the whole dang time
 		VkResult poolCreated = vk_util::createCommandPool(logicalDevice, graphicsQueueFamily, pAllocator, &frameData.commandPool);
@@ -975,10 +1018,15 @@ struct VulkanBackend
 		vkWaitForFences(logicalDevice, 1, &imageAvailableFence, VK_TRUE, 1000000000);
 		vkResetFences(logicalDevice, 1, &imageAvailableFence);
 		VkResult imageAcquired = vkAcquireNextImageKHR(logicalDevice, swapchain, UINT64_MAX, imageAvailableSemaphore, imageAvailableFence, &imageIndex);
+		if (imageAcquired == VK_ERROR_OUT_OF_DATE_KHR)
+		{
+			resizeRequested = true;
+			return;
+		}
 		//printf("image acquired: %s\n", string_VkResult(imageAcquired));
 		
-		drawExtent2D.width = drawImage.imageExtent.width;
-		drawExtent2D.height = drawImage.imageExtent.height;
+		drawExtent2D.width = std::min(windowExtent.width, drawImage.imageExtent.width) * renderScale;
+		drawExtent2D.height = std::min(windowExtent.height, drawImage.imageExtent.height) * renderScale;
 		beginCommandBuffer();
 		
 		// transition draw image to be drawable with a pipeline barrier
@@ -1059,8 +1107,8 @@ struct VulkanBackend
 			VkViewport viewport = {};
 			viewport.x = 0;
 			viewport.y = 0;
-			viewport.width = drawExtent2D.width;
-			viewport.height =drawExtent2D.height;
+			viewport.width =  drawExtent2D.width;
+			viewport.height = drawExtent2D.height;
 			viewport.minDepth = 0.f;
 			viewport.maxDepth = 1.f;
 			
@@ -1175,7 +1223,14 @@ struct VulkanBackend
 		presentInfo.pWaitSemaphores = &renderFinishedSemaphores[imageIndex];
 		presentInfo.pImageIndices = &imageIndex;
 		
-		VkResult presented = vkQueuePresentKHR(graphicsQueue, &presentInfo);
+		if (!resizeRequested)
+		{
+			VkResult presented = vkQueuePresentKHR(graphicsQueue, &presentInfo);
+			if (presented == VK_ERROR_OUT_OF_DATE_KHR)
+			{
+				resizeRequested = true;
+			}
+		}
 		//printf("image presented: %s\n", string_VkResult(presented));
 		
 		frameNumber++;
@@ -1194,6 +1249,7 @@ struct VulkanBackend
 		outUI->data3 = (real32*) &currentEffect.data.data3;
 		outUI->data4 = (real32*) &currentEffect.data.data4;
 		
+		outUI->renderScale = &renderScale;
 	}
 
 };

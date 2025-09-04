@@ -21,6 +21,9 @@ typedef RENDER_WINDOW_CALLBACK(RenderWindowCallback);
 static bool32 GLOBAL_RUNNING = true;
 static int64 GLOBAL_PERF_COUNT_FREQ = 0;
 static WINDOWPLACEMENT GLOBAL_WINDOW_POS = { sizeof(GLOBAL_WINDOW_POS)};
+static uint32 GLOBAL_REQUESTED_WINDOW_RESIZE;
+static uint32 GLOBAL_REQUESTED_WINDOW_WIDTH;
+static uint32 GLOBAL_REQUESTED_WINDOW_HEIGHT;
 static HWND GLOBAL_WINDOW_HANDLE = 0;
 static HINSTANCE GLOBAL_INSTANCE_HANDLE = 0;
 GameInput inputLastFrame;
@@ -67,6 +70,23 @@ Win32MainWindowCallback(HWND Window,
 		case WM_DESTROY:
 		{
 			GLOBAL_RUNNING = false;
+		} break;
+
+		case WM_SIZE:
+		{
+			if (WParam != SIZE_MINIMIZED)
+				{
+					// TODO(james): make this a non renderer specific interface
+					// Resize swap chain
+					uint32 newWidth = (UINT)LOWORD(LParam);
+					uint32 newHeight = (UINT)HIWORD(LParam);
+					if (newWidth > 0 && newHeight > 0)
+					{
+						GLOBAL_REQUESTED_WINDOW_RESIZE = true;
+						GLOBAL_REQUESTED_WINDOW_WIDTH = newWidth;
+						GLOBAL_REQUESTED_WINDOW_HEIGHT = newHeight;
+					}
+				}
 		} break;
 		
 		default:
@@ -282,6 +302,7 @@ WinMain(HINSTANCE instance,
 	OutputDebugStringA("Renderer backend initialized");
 
 	setvbuf(stdout, NULL, _IONBF, 0);
+	GLOBAL_REQUESTED_WINDOW_RESIZE = false;
     while(GLOBAL_RUNNING)
     {
 		// reload dll if needed
@@ -303,6 +324,11 @@ WinMain(HINSTANCE instance,
         {
             gameDLL.gameUpdate(&memory, &inputForFrame, TargetSecondsPerFrame);
         }
+		if (GLOBAL_REQUESTED_WINDOW_RESIZE)
+		{
+			backend.resizeSwapchain(GLOBAL_REQUESTED_WINDOW_WIDTH, GLOBAL_REQUESTED_WINDOW_HEIGHT);
+			GLOBAL_REQUESTED_WINDOW_RESIZE = false;
+		}
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
@@ -338,6 +364,6 @@ WinMain(HINSTANCE instance,
 			}
 		}
     }
-	backend.cleanup(nullptr);
+	backend.cleanup();
 	return 0;
 }
