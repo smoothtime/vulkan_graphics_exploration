@@ -559,8 +559,8 @@ struct VulkanBackend
 		meshPipelineBuilder.setPolygonMode(VK_POLYGON_MODE_FILL);
 		meshPipelineBuilder.setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
 		meshPipelineBuilder.setMultisamplingNone();
-		meshPipelineBuilder.disableBlending();
-		//meshPipelineBuilder.disableDepthTest();
+		//meshPipelineBuilder.disableBlending();
+		meshPipelineBuilder.enableBlendingAdditive();
 		meshPipelineBuilder.enableDepthTest(true, VK_COMPARE_OP_GREATER);
 		meshPipelineBuilder.setColorAttachmentFormat(drawImage.imageFormat);
 		meshPipelineBuilder.setDepthFormat(depthImage.imageFormat);
@@ -1077,7 +1077,7 @@ struct VulkanBackend
 			
 			// hard coded to triangle shader that has an array of exactly 3 vertices
 			// vertex count, instance count, first vertex, firstInstance
-			vkCmdDraw(frameData.graphicsCommandBuffer, 3, 1, 0, 0);
+			//vkCmdDraw(frameData.graphicsCommandBuffer, 3, 1, 0, 0);
 			
 			// triangle mesh rectangle
 			vkCmdBindPipeline(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipeline);
