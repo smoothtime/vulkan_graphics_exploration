@@ -236,15 +236,16 @@ struct VulkanBackend
 		lDeviceQueueCreateInfo.queueFamilyIndex = 0; // hardcoded
 		lDeviceQueueCreateInfo.queueCount = 1; // hardcoded
 		lDeviceQueueCreateInfo.pQueuePriorities = &priority;
-		
-		VkPhysicalDeviceSynchronization2Features synch2Features = {};
-		synch2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
-		synch2Features.pNext = nullptr;
-		synch2Features.synchronization2 = VK_TRUE;
+
+		VkPhysicalDeviceVulkan13Features vulkan13Features = {};
+		vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+		vulkan13Features.pNext = nullptr;
+		vulkan13Features.dynamicRendering = VK_TRUE;
+		vulkan13Features.synchronization2 = VK_TRUE;
 
 		VkPhysicalDeviceBufferDeviceAddressFeatures deviceAddressFeatures = {};
 		deviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-		deviceAddressFeatures.pNext = &synch2Features;
+		deviceAddressFeatures.pNext = &vulkan13Features;
 		deviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
 		
 		VkDeviceCreateInfo lDeviceCreateInfo = {};
