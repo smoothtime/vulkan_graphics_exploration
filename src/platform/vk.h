@@ -18,6 +18,7 @@
             abort();                                                    \
         }                                                               \
     } while (0)
+#include "vk_descriptors.h"
 #include "vk_types.h"
 #include "vk_utility.h"
 
@@ -51,6 +52,9 @@ struct VulkanBackend
 	vk_util::DescriptorAllocator 	globalDescriptorAllocator;
 	VkDescriptorSet 				drawImageDescriptorSet;
 	VkDescriptorSetLayout 			drawImageDescriptorSetLayout;
+
+	GPUSceneData					sceneData;
+	VkDescriptorSetLayout 			gpuSceneDataDescriptorSetLayout;
 	
 	VkPipelineLayout		gradientPipelineLayout;
 	
@@ -389,7 +393,8 @@ struct VulkanBackend
 		// initialize descriptors for the draw image
 		std::vector<vk_util::DescriptorAllocator::PoolSizeRatio> sizes = 
 		{
-			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }
 		};
 		globalDescriptorAllocator.initPool(logicalDevice, 10, sizes, pAllocator);
 		{
@@ -399,25 +404,37 @@ struct VulkanBackend
 		}
 		drawImageDescriptorSet = globalDescriptorAllocator.allocate(logicalDevice, drawImageDescriptorSetLayout);
 		
-		VkDescriptorImageInfo imageInfo = {};
-		imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-		imageInfo.imageView = drawImage.imageView;
-		
-		VkWriteDescriptorSet drawImageWrite = {};
-		drawImageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		drawImageWrite.pNext = nullptr;
-		drawImageWrite.dstBinding = 0;
-		drawImageWrite.dstSet = drawImageDescriptorSet;
-		drawImageWrite.descriptorCount = 1;
-		drawImageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		drawImageWrite.pImageInfo = &imageInfo;
-		
-		vkUpdateDescriptorSets(logicalDevice, 1, &drawImageWrite, 0, nullptr);
+		DescriptorWriter writer;
+		writer.writeImage(0, drawImage.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+		writer.updateSet(logicalDevice, drawImageDescriptorSet);
 		
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
 			be->globalDescriptorAllocator.destroyPool(be->logicalDevice, be->pAllocator);
 			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
 		});
+
+		// initialize the descriptor sets per frame
+		std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> frameSizes = 
+		{
+			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3},
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3},
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3},
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4},
+		};
+		frameData.frameDescriptors = DescriptorAllocatorGrowable{};
+		frameData.frameDescriptors.init(logicalDevice, 1000, frameSizes, pAllocator);
+
+		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
+			be->frameData.frameDescriptors.destroyPools(be->logicalDevice, pAllocator);
+			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
+		});
+
+		// initialize descriptor set layout for scene data
+		{
+			vk_util::DescriptorLayoutBuilder builder;
+			builder.addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+  			gpuSceneDataDescriptorSetLayout = builder.build(logicalDevice, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, pAllocator, nullptr, 0);
+		}
 		
 		// initialize the depth image
 		depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
@@ -1014,6 +1031,7 @@ struct VulkanBackend
 		vkResetFences(logicalDevice, 1, &syncHostWithDeviceFence);
 		
 		frameData.deletionQueue.flush(this);
+		frameData.frameDescriptors.clearPools(logicalDevice);
 		
 		// acquire image
 		vkWaitForFences(logicalDevice, 1, &imageAvailableFence, VK_TRUE, 1000000000);
@@ -1131,6 +1149,26 @@ struct VulkanBackend
 			// triangle mesh rectangle
 			vkCmdBindPipeline(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipeline);
 			
+			// allocate new uniform buffer for scene data, write scene data into it, and write into descriptor set for frame
+			{
+				//VmaAllocator& vAllocator, size_t allocSize, VkBufferUsageFlags bufferUsage, VmaMemoryUsage memoryUsage
+				AllocatedBuffer gpuSceneDataBuffer = vk_util::createBuffer(vAllocator, sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+				frameData.deletionQueue.pushFunction([&](VulkanBackend* be) {
+					vk_util::destroyBuffer(be->vAllocator, gpuSceneDataBuffer);
+				});
+
+				GPUSceneData *pSceneDataUniform = (GPUSceneData*)gpuSceneDataBuffer.allocation->GetMappedData();
+				*pSceneDataUniform = sceneData;
+
+				// we clearPools every frame so this shouldn't grow
+				VkDescriptorSet sceneUniformsDescriptorSet = frameData.frameDescriptors.allocate(logicalDevice, gpuSceneDataDescriptorSetLayout, nullptr, pAllocator);
+
+				DescriptorWriter writer;
+				writer.writeBuffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+				writer.updateSet(logicalDevice, sceneUniformsDescriptorSet);
+
+			}
+
 			GPUDrawPushConstants meshPushConstants;
 
 			glm::mat4 view = glm::translate(glm::vec3{ 0, 0, -5 });
