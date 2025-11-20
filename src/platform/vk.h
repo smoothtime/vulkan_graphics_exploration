@@ -826,7 +826,7 @@ struct VulkanBackend
 		printf("allocated imm command buffer: %s\n", string_VkResult(immCommandBufferAllocated));
 		
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
-			vkDestroyCommandPool(be->logicalDevice, be->immCommandPool, nullptr); //pAllocator
+			vkDestroyCommandPool(be->logicalDevice, be->immCommandPool, be->pAllocator);
 		});
 		
 	}
@@ -1153,7 +1153,7 @@ struct VulkanBackend
 			{
 				//VmaAllocator& vAllocator, size_t allocSize, VkBufferUsageFlags bufferUsage, VmaMemoryUsage memoryUsage
 				AllocatedBuffer gpuSceneDataBuffer = vk_util::createBuffer(vAllocator, sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-				frameData.deletionQueue.pushFunction([&](VulkanBackend* be) {
+				frameData.deletionQueue.pushFunction([=](VulkanBackend* be) mutable {
 					vk_util::destroyBuffer(be->vAllocator, gpuSceneDataBuffer);
 				});
 
