@@ -49,7 +49,7 @@ struct VulkanBackend
 	uint32 	graphicsQueueFamily;
 	VkCommandBufferBeginInfo commandBufferBeginInfo;
 	
-	vk_util::DescriptorAllocator 	globalDescriptorAllocator;
+	DescriptorAllocator 			globalDescriptorAllocator;
 	VkDescriptorSet 				drawImageDescriptorSet;
 	VkDescriptorSetLayout 			drawImageDescriptorSetLayout;
 
@@ -391,14 +391,14 @@ struct VulkanBackend
 		});
 		
 		// initialize descriptors for the draw image
-		std::vector<vk_util::DescriptorAllocator::PoolSizeRatio> sizes = 
+		std::vector<DescriptorAllocator::PoolSizeRatio> sizes = 
 		{
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }
 		};
 		globalDescriptorAllocator.initPool(logicalDevice, 10, sizes, pAllocator);
 		{
-			vk_util::DescriptorLayoutBuilder builder;
+			DescriptorLayoutBuilder builder;
 			builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 			drawImageDescriptorSetLayout = builder.build(logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT, pAllocator);
 		}
@@ -409,7 +409,7 @@ struct VulkanBackend
 		writer.updateSet(logicalDevice, drawImageDescriptorSet);
 
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			be->frameData.frameDescriptors.destroyPools(be->logicalDevice, be->pAllocator);
+			globalDescriptorAllocator.destroyPool(be->logicalDevice, be->pAllocator);
 			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
 		});
 
@@ -428,7 +428,7 @@ struct VulkanBackend
 
 		// initialize descriptor set layout for scene data
 		{
-			vk_util::DescriptorLayoutBuilder builder;
+			DescriptorLayoutBuilder builder;
 			builder.addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
   			gpuSceneDataDescriptorSetLayout = builder.build(logicalDevice, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, pAllocator, nullptr, 0);
 		}
@@ -776,8 +776,8 @@ struct VulkanBackend
 			vk_util::destroyBuffer(vAllocator, mesh.meshBuffers.indexBuffer);
 			vk_util::destroyBuffer(vAllocator, mesh.meshBuffers.vertexBuffer);
 		}
-		vulkanDeletionQueue.flush(this);
 		frameData.deletionQueue.flush(this);
+		vulkanDeletionQueue.flush(this);
 		
 		// TODO(James) vkDestroyPipelineLayout when we have them
 		// TODO(James) vkDestroyPipelineLayout when we have them
@@ -1081,7 +1081,7 @@ struct VulkanBackend
 			// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
 			uint32 groupCountX = std::ceil(drawExtent2D.width / 16.0);
 			uint32 groupCountY = std::ceil(drawExtent2D.height / 16.0);
-			printf("draw extent is %d by %d dispatching in groups of %d by %d\n", drawImage.imageExtent.width, drawImage.imageExtent.height, groupCountX, groupCountY);
+			// printf("draw extent is %d by %d dispatching in groups of %d by %d\n", drawImage.imageExtent.width, drawImage.imageExtent.height, groupCountX, groupCountY);
 			vkCmdDispatch(frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
 		}
 		// transition draw image for rendering with graphics pipeline
