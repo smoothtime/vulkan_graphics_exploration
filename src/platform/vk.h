@@ -407,9 +407,9 @@ struct VulkanBackend
 		DescriptorWriter writer;
 		writer.writeImage(0, drawImage.imageView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 		writer.updateSet(logicalDevice, drawImageDescriptorSet);
-		
+
 		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			be->globalDescriptorAllocator.destroyPool(be->logicalDevice, be->pAllocator);
+			be->frameData.frameDescriptors.destroyPools(be->logicalDevice, be->pAllocator);
 			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
 		});
 
@@ -424,10 +424,7 @@ struct VulkanBackend
 		frameData.frameDescriptors = DescriptorAllocatorGrowable{};
 		frameData.frameDescriptors.init(logicalDevice, 1000, frameSizes, pAllocator);
 
-		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
-			be->frameData.frameDescriptors.destroyPools(be->logicalDevice, pAllocator);
-			vkDestroyDescriptorSetLayout(be->logicalDevice, be->drawImageDescriptorSetLayout, be->pAllocator);
-		});
+
 
 		// initialize descriptor set layout for scene data
 		{
@@ -435,6 +432,10 @@ struct VulkanBackend
 			builder.addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
   			gpuSceneDataDescriptorSetLayout = builder.build(logicalDevice, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, pAllocator, nullptr, 0);
 		}
+		vulkanDeletionQueue.pushFunction([&](VulkanBackend *be) {
+			be->frameData.frameDescriptors.destroyPools(be->logicalDevice, be->pAllocator);
+			vkDestroyDescriptorSetLayout(be->logicalDevice, be->gpuSceneDataDescriptorSetLayout, be->pAllocator);
+		});
 		
 		// initialize the depth image
 		depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
@@ -1151,7 +1152,6 @@ struct VulkanBackend
 			
 			// allocate new uniform buffer for scene data, write scene data into it, and write into descriptor set for frame
 			{
-				//VmaAllocator& vAllocator, size_t allocSize, VkBufferUsageFlags bufferUsage, VmaMemoryUsage memoryUsage
 				AllocatedBuffer gpuSceneDataBuffer = vk_util::createBuffer(vAllocator, sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 				frameData.deletionQueue.pushFunction([=](VulkanBackend* be) mutable {
 					vk_util::destroyBuffer(be->vAllocator, gpuSceneDataBuffer);
