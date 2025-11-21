@@ -55,6 +55,8 @@ struct VulkanBackend
 
 	GPUSceneData					sceneData;
 	VkDescriptorSetLayout 			gpuSceneDataDescriptorSetLayout;
+
+	VkDescriptorSetLayout			singleImageDescriptorSetLayout;
 	
 	VkPipelineLayout		gradientPipelineLayout;
 	
@@ -85,6 +87,16 @@ struct VulkanBackend
 	// homie do we really want a vector of shared pointers flying around?
 	// homie you do not. Let's keep track of these explicitly when out of tutorial land
 	std::vector<MeshAsset> testMeshes;
+
+	// Textures
+	AllocatedImage	whiteImage;
+	AllocatedImage	blackImage;
+	AllocatedImage	grayImage;
+	AllocatedImage	errorCheckerboardImage;
+
+	VkSampler		defaultSamplerLinear;
+	VkSampler		defaultSamplerNearest;
+
 
 	// fucking around
 	VkImage testImage;
@@ -177,6 +189,113 @@ struct VulkanBackend
 		createSwapchain(true);
 		resizeRequested = false;
 	}
+
+	AllocatedImage
+	createImage(VkExtent3D size, VkImageType imageType, VkFormat format, VkImageUsageFlags usageFlags, bool mipMapped = false)
+	{
+		AllocatedImage image;
+		image.imageExtent = size;
+		image.imageFormat = format;
+												
+		VkImageCreateInfo imageCreateInfo = {};
+		imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageCreateInfo.imageType = imageType;//VK_IMAGE_TYPE_2D;
+		imageCreateInfo.format = image.imageFormat;
+		imageCreateInfo.extent = image.imageExtent;
+		imageCreateInfo.usage = usageFlags;
+		if (mipMapped)
+		{
+			
+			imageCreateInfo.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(size.width, size.height)))) + 1;
+		} else
+		{
+			imageCreateInfo.mipLevels = 1; // hardcoded
+		}
+		// TODO there may be some logic if we need to support images with Y'CBCR Conversion, but I honestly don't know what the means atm
+		imageCreateInfo.arrayLayers = 1; //hardcoded
+		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT; // hardcoded
+		
+		VmaAllocationCreateInfo allocationCreateInfo = {};
+		allocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		allocationCreateInfo.requiredFlags = VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		
+		VkResult imageCreated = vmaCreateImage(vAllocator, &imageCreateInfo, &allocationCreateInfo, &image.imageHandle, &image.allocation, nullptr);
+		printf("image created: %s\n", string_VkResult(imageCreated));
+		
+		VkImageViewCreateInfo imageViewCreateInfo = {};
+		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		imageViewCreateInfo.pNext = nullptr;
+		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewCreateInfo.image = image.imageHandle;
+		imageViewCreateInfo.format = image.imageFormat;
+		imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+		imageViewCreateInfo.subresourceRange.levelCount = imageCreateInfo.mipLevels;
+		imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+		imageViewCreateInfo.subresourceRange.layerCount = 1;
+		imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		if (format == VK_FORMAT_D32_SFLOAT)
+		{
+			imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		}
+		
+		
+		VkResult imageViewCreated = vkCreateImageView(logicalDevice, &imageViewCreateInfo, pAllocator, &image.imageView);
+		VK_CHECK(imageViewCreated);
+
+		return image;
+	}
+
+	/**
+	 * Assumes incoming data is in RGBA8 format
+	 */
+	AllocatedImage
+	createImage(void *data, VkExtent3D size, VkFormat format, VkImageUsageFlags usageFlags, bool mipMapped = false)
+	{
+
+		// prepare staging buffer to copy data
+		size_t dataSize = size.depth * size.height * size.width * 4;
+		VmaAllocationCreateFlags allocFlags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT; // need mapping to memcpy into allocInfo.pMappedData
+		AllocatedBuffer uploadBuffer = vk_util::createBufferAuto(vAllocator, dataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST, allocFlags);
+		memcpy(uploadBuffer.allocationInfo.pMappedData, data, dataSize);
+
+		// create image
+		usageFlags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		usageFlags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		AllocatedImage image = createImage(size, VK_IMAGE_TYPE_2D, format, usageFlags, mipMapped);
+		
+		//write data;
+		immediateSubmit([&](VkCommandBuffer cmd) {
+			transitionImage(cmd, image.imageHandle, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+			VkBufferImageCopy copyRegion = {};
+			copyRegion.bufferOffset = 0;
+			copyRegion.bufferRowLength = 0;
+			copyRegion.bufferImageHeight = 0;
+
+			// TODO presently only copying into top mipLevel regardless if there is mipMapping
+			copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			copyRegion.imageSubresource.mipLevel = 0;
+			copyRegion.imageSubresource.baseArrayLayer = 0;
+			copyRegion.imageSubresource.layerCount = 1;
+			copyRegion.imageExtent = size;
+
+			vkCmdCopyBufferToImage(cmd, uploadBuffer.buffer, image.imageHandle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+			transitionImage(cmd, image.imageHandle, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		});
+
+		vk_util::destroyBuffer(vAllocator, uploadBuffer);
+
+		return image;
+	}
+
+	void
+	destroyImage(AllocatedImage image)
+	{
+		vkDestroyImageView(logicalDevice, image.imageView, pAllocator);
+		vmaDestroyImage(vAllocator, image.imageHandle, image.allocation);
+	}
+
 
 	void
 	initialize(uint32 requestedExtensionCount, const char **requestedInstanceExtensions, uint32 enabledLayerCount, const char **enabledLayers, uint32 deviceExtensionCount, const char **requestedDeviceExtensions, RenderWindowCallback *windowCreationCallback, const VkAllocationCallbacks* allocCallbacks)
@@ -437,6 +556,16 @@ struct VulkanBackend
 			vkDestroyDescriptorSetLayout(be->logicalDevice, be->gpuSceneDataDescriptorSetLayout, be->pAllocator);
 		});
 		
+		// initialize descriptor set for single image sampling
+		{
+			DescriptorLayoutBuilder builder;
+			// TODO technically more efficient to have two bindings one for the sampler and one for the image
+			// would need to redo tex_image.frag shader
+			builder.addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+			singleImageDescriptorSetLayout = builder.build(logicalDevice, VK_SHADER_STAGE_FRAGMENT_BIT, pAllocator, nullptr, 0);
+		}
+
+
 		// initialize the depth image
 		depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
 		depthImage.imageExtent = drawImageExtent;
@@ -604,16 +733,18 @@ struct VulkanBackend
 
 		triMeshPipelineLayoutInfo.pPushConstantRanges = &bufferRange;
 		triMeshPipelineLayoutInfo.pushConstantRangeCount = 1;
+		triMeshPipelineLayoutInfo.pSetLayouts = &singleImageDescriptorSetLayout;
+		triMeshPipelineLayoutInfo.setLayoutCount = 1;
 		
 		VkShaderModule triangleMeshVertexShader;
 		if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle_mesh.vert.spv", logicalDevice, &triangleMeshVertexShader))
 		{
-			printf("failed to load triangle vertex shader");
+			printf("failed to load triangle mesh vertex shader");
 		}
 		VkShaderModule triangleMeshFragmentShader;
-		if (!vk_util::loadShaderModule("..\\shaders\\colored_triangle.frag.spv", logicalDevice, &triangleMeshFragmentShader))
+		if (!vk_util::loadShaderModule("..\\shaders\\tex_image.frag.spv", logicalDevice, &triangleMeshFragmentShader))
 		{
-			printf("failed to load triangle fragment shader");
+			printf("failed to load triangle mesh fragment shader");
 		}
 		
 		VkResult triangleMeshPipelineLayoutCreated = vkCreatePipelineLayout(logicalDevice, &triMeshPipelineLayoutInfo, pAllocator, &triangleMeshPipelineLayout);
@@ -626,8 +757,8 @@ struct VulkanBackend
 		meshPipelineBuilder.setPolygonMode(VK_POLYGON_MODE_FILL);
 		meshPipelineBuilder.setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
 		meshPipelineBuilder.setMultisamplingNone();
-		//meshPipelineBuilder.disableBlending();
-		meshPipelineBuilder.enableBlendingAdditive();
+		meshPipelineBuilder.disableBlending();
+		//meshPipelineBuilder.enableBlendingAdditive();
 		meshPipelineBuilder.enableDepthTest(true, VK_COMPARE_OP_GREATER);
 		meshPipelineBuilder.setColorAttachmentFormat(drawImage.imageFormat);
 		meshPipelineBuilder.setDepthFormat(depthImage.imageFormat);
@@ -646,6 +777,7 @@ struct VulkanBackend
 		
 		// init default data
 		{
+			// default rectangle
 			std::array<Vertex,4> rectVertices;
 
 			rectVertices[0].position = { 4.5, -2.5, -2};
@@ -676,6 +808,42 @@ struct VulkanBackend
 				vk_util::destroyBuffer(be->vAllocator, be->rectangle.vertexBuffer);
 			});
 
+			// default textures
+			uint32 white = glm::packUnorm4x8(glm::vec4(1,1,1,1));
+			whiteImage = createImage((void*)&white, VkExtent3D { 1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+			uint32 gray = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1));
+			grayImage = createImage((void*)&gray, VkExtent3D { 1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+			uint32 black = glm::packUnorm4x8(glm::vec4(0,0,0,1));
+			blackImage = createImage((void*)&black, VkExtent3D { 1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+			uint32 magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
+			std::array<uint32, 16 * 16> checkerBoardPixels;
+			for (uint32 x = 0; x < 16; ++x)
+			{
+				for(uint32 y = 0; y < 16; ++y)
+				{
+					checkerBoardPixels[y * 16 + x] = ((x % 2) ^ (y % 2)) ? magenta : black;
+				}
+			}
+			errorCheckerboardImage = createImage(checkerBoardPixels.data(), VkExtent3D{16, 16, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, false);
+
+			VkSamplerCreateInfo samplerCreateInfo = {};
+			samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+			samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
+			VK_CHECK(vkCreateSampler(logicalDevice, &samplerCreateInfo, pAllocator, &defaultSamplerNearest));
+			samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+			samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+			VK_CHECK(vkCreateSampler(logicalDevice, &samplerCreateInfo, pAllocator, &defaultSamplerLinear));
+
+			vulkanDeletionQueue.pushFunction([&](VulkanBackend* be) {
+				vkDestroySampler(be->logicalDevice, be->defaultSamplerLinear, be->pAllocator);
+				vkDestroySampler(be->logicalDevice, be->defaultSamplerNearest, be->pAllocator);
+
+				be->destroyImage(be->whiteImage);
+				be->destroyImage(be->grayImage);
+				be->destroyImage(be->blackImage);
+				be->destroyImage(be->errorCheckerboardImage);
+			});
 		}
 		
 		// fucking around
@@ -927,7 +1095,7 @@ struct VulkanBackend
 	}
 
 	void
-	transitionImage(VkImage image, VkImageAspectFlags aspectFlags, VkImageLayout oldLayout, VkImageLayout newLayout)
+	transitionImage(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspectFlags, VkImageLayout oldLayout, VkImageLayout newLayout)
 	{
 		assert(isInitialized);
 		VkImageSubresourceRange imageSubresourceRange {};
@@ -955,7 +1123,7 @@ struct VulkanBackend
 		dependencyInfo.imageMemoryBarrierCount = 1;
 		dependencyInfo.pImageMemoryBarriers = &imageBarrier;
 		
-		vkCmdPipelineBarrier2(frameData.graphicsCommandBuffer, &dependencyInfo);
+		vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 	}
 
 	void
@@ -1054,7 +1222,7 @@ struct VulkanBackend
 		VkImageAspectFlags depthAspectFlags = VK_IMAGE_ASPECT_DEPTH_BIT;
 		VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		VkImageLayout newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		transitionImage(drawImage.imageHandle, colorAspectFlags, oldLayout, newLayout);
+		transitionImage(frameData.graphicsCommandBuffer, drawImage.imageHandle, colorAspectFlags, oldLayout, newLayout);
 		
 		// translate commands for frame to vk commands
 		#if 0
@@ -1085,9 +1253,9 @@ struct VulkanBackend
 			vkCmdDispatch(frameData.graphicsCommandBuffer, groupCountX, groupCountY, 1);
 		}
 		// transition draw image for rendering with graphics pipeline
-		transitionImage(drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		transitionImage(frameData.graphicsCommandBuffer, drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 		// transition depth image
-		transitionImage(depthImage.imageHandle, depthAspectFlags, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+		transitionImage(frameData.graphicsCommandBuffer, depthImage.imageHandle, depthAspectFlags, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
 		// render geometry
 		{
@@ -1151,6 +1319,8 @@ struct VulkanBackend
 			vkCmdBindPipeline(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipeline);
 			
 			// allocate new uniform buffer for scene data, write scene data into it, and write into descriptor set for frame
+			bool drawingGPUScene = false;
+			if (drawingGPUScene)
 			{
 				AllocatedBuffer gpuSceneDataBuffer = vk_util::createBuffer(vAllocator, sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 				frameData.deletionQueue.pushFunction([=](VulkanBackend* be) mutable {
@@ -1167,6 +1337,16 @@ struct VulkanBackend
 				writer.writeBuffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 				writer.updateSet(logicalDevice, sceneUniformsDescriptorSet);
 
+			} else
+			{
+				// we clearPools every frame so this won't grow
+				VkDescriptorSet singleImageDescriptorSet = frameData.frameDescriptors.allocate(logicalDevice, singleImageDescriptorSetLayout, nullptr, pAllocator);
+				
+				DescriptorWriter writer;
+				writer.writeImage(0, errorCheckerboardImage.imageView, defaultSamplerNearest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+				writer.updateSet(logicalDevice, singleImageDescriptorSet);
+
+				vkCmdBindDescriptorSets(frameData.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, triangleMeshPipelineLayout, 0, 1, &singleImageDescriptorSet, 0, nullptr);
 			}
 
 			GPUDrawPushConstants meshPushConstants;
@@ -1202,18 +1382,18 @@ struct VulkanBackend
 		}
 		
 		// transfer image from drawImage to the swapchain image
-		transitionImage(drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-		transitionImage(swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		transitionImage(frameData.graphicsCommandBuffer, drawImage.imageHandle, colorAspectFlags, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		transitionImage(frameData.graphicsCommandBuffer, swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		copyImage(frameData.graphicsCommandBuffer, drawImage.imageHandle, swapchainImageHandles[imageIndex], drawExtent2D, windowExtent);
 		
 		// make swapchain image layout attachment optimal so we can draw immediate mode commands
-		transitionImage(swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		transitionImage(frameData.graphicsCommandBuffer, swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 		
 		//draw imgui
 		drawImGui(frameData.graphicsCommandBuffer, swapchainImageViews[imageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, windowExtent);
 		
 		// make swapchain image presentable with a pipeline barrier
-		transitionImage(swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+		transitionImage(frameData.graphicsCommandBuffer, swapchainImageHandles[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 		
 		// end command buffer
 		vkEndCommandBuffer(frameData.graphicsCommandBuffer);

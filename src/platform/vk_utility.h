@@ -85,6 +85,23 @@ namespace vk_util{
 		VK_CHECK(vmaCreateBuffer(vAllocator, &bufferCreateInfo, &allocCreateInfo, &newBuffer.buffer, &newBuffer.allocation, &newBuffer.allocationInfo));
 		return newBuffer;
 	}
+
+	AllocatedBuffer createBufferAuto(VmaAllocator& vAllocator, size_t allocSize, VkBufferUsageFlags bufferUsage, VmaMemoryUsage memoryUsage, VmaAllocationCreateFlags allocFlags)
+	{
+		VkBufferCreateInfo bufferCreateInfo = {};
+		bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferCreateInfo.pNext = nullptr;
+		bufferCreateInfo.size = allocSize;
+		bufferCreateInfo.usage = bufferUsage;
+
+		VmaAllocationCreateInfo allocCreateInfo = {};
+		allocCreateInfo.usage = memoryUsage;
+		allocCreateInfo.flags = allocFlags;
+		
+		AllocatedBuffer newBuffer;
+		VK_CHECK(vmaCreateBuffer(vAllocator, &bufferCreateInfo, &allocCreateInfo, &newBuffer.buffer, &newBuffer.allocation, &newBuffer.allocationInfo));
+		return newBuffer;
+	}
 	
 	void destroyBuffer(VmaAllocator& vAllocator, AllocatedBuffer &buffer)
 	{
